@@ -11,6 +11,14 @@ var VERSION_CHECK_URL = "https://tabswitcher.app/version.json";
 var mru = [];
 var initialized = false;
 
+// Ctrl+Tab switcher contents (Dia-style): every tab that was on screen within the last
+// ACTIVE_WINDOW_MS, plus enough of the most recently used tabs to always show at least
+// MIN_SWITCHER_TABS (when that many exist). The full MRU is still tracked underneath.
+var MIN_SWITCHER_TABS = 4;
+var ACTIVE_WINDOW_MS = 5 * 60 * 1000;
+var tabLastSeen = {};        // tabId -> timestamp (ms) the tab was last on screen
+var activeTabByWindow = {};  // windowId -> tabId currently active in that window
+
 // Switch state
 var slowSwitchOngoing = false;
 var fastSwitchOngoing = false;
@@ -271,11 +279,24 @@ var endSwitch = function() {
 	printMRUSimple();
 }
 
+// Record that a tab is on screen now. The tab it replaced in that window was on screen
+// until this moment, so it gets stamped too.
+var markTabSeen = function(tabId, windowId) {
+	var now = Date.now();
+	var previous = activeTabByWindow[windowId];
+	if (previous !== undefined && previous !== tabId) {
+		tabLastSeen[previous] = now;
+	}
+	activeTabByWindow[windowId] = tabId;
+	tabLastSeen[tabId] = now;
+};
+
 chrome.tabs.onActivated.addListener(function(activeInfo){
 	// Note: By the time this fires, the new tab is already visible
 	// So we capture the NEW tab's thumbnail (the one we just switched to)
 	// This ensures each tab's thumbnail is captured while it's visible
 	lastActiveTabId = activeInfo.tabId;
+	markTabSeen(activeInfo.tabId, activeInfo.windowId);
 
 	if(!slowSwitchOngoing && !fastSwitchOngoing && !nativeSwitchOngoing) {
 		var index = mru.indexOf(activeInfo.tabId);
@@ -314,6 +335,12 @@ chrome.tabs.onCreated.addListener(function(tab) {
 chrome.tabs.onRemoved.addListener(function(tabId, removedInfo) {
 	log("Tab remove event fired from tab("+tabId+")");
 	removeTabFromMRU(tabId);
+	delete tabLastSeen[tabId];
+	for (var winId in activeTabByWindow) {
+		if (activeTabByWindow[winId] === tabId) {
+			delete activeTabByWindow[winId];
+		}
+	}
 	// Clean up thumbnail when tab is closed
 	delete tabThumbnails[tabId];
 	var thumbIndex = tabThumbnailOrder.indexOf(tabId);
@@ -383,6 +410,9 @@ var initialize = function() {
 			windows.forEach(function(window){
 				window.tabs.forEach(function(tab){
 					mru.unshift(tab.id);
+					if (tab.active) {
+						markTabSeen(tab.id, window.id);
+					}
 				});
 			});
 			log("MRU after init: "+mru);
@@ -569,6 +599,8 @@ var connectNativeHost = function() {
 				handleRequestShowUI(message.current_window_only);
 			} else if (message.action === "end_switch") {
 				handleNativeEndSwitch();
+			} else if (message.action === "select_index") {
+				handleNativeSelectIndex(message.index);
 			} else if (message.action === "copy_url") {
 				handleCopyUrl();
 			} else if (message.action === "error_no_accessibility") {
@@ -617,34 +649,62 @@ var uiShownDuringSwitch = false;
 var filteredMru = [];
 var currentWindowOnly = false;
 
-// Get filtered MRU based on current window setting
-var getFilteredMru = async function() {
-	if (!currentWindowOnly) {
-		return mru;
+// Keep tabs seen within ACTIVE_WINDOW_MS, in MRU order, padding from the front of the MRU so
+// at least MIN_SWITCHER_TABS are shown when that many exist.
+var applyActivityWindow = async function(orderedTabIds) {
+	var now = Date.now();
+	// Tabs currently on screen in any window count as seen right now
+	try {
+		var activeTabs = await chrome.tabs.query({active: true});
+		for (var i = 0; i < activeTabs.length; i++) {
+			tabLastSeen[activeTabs[i].id] = now;
+		}
+	} catch (e) {
+		log("Error querying active tabs: " + e.message);
 	}
 	
-	// Get the current window
-	try {
-		var currentWindow = await chrome.windows.getCurrent();
-		var currentWindowId = currentWindow.id;
-		
-		// Filter MRU to only include tabs from current window
-		var filtered = [];
-		for (var i = 0; i < mru.length; i++) {
-			try {
-				var tab = await chrome.tabs.get(mru[i]);
-				if (tab && tab.windowId === currentWindowId) {
-					filtered.push(mru[i]);
-				}
-			} catch (e) {
-				// Tab may have been closed
-			}
+	var shown = [];
+	for (var j = 0; j < orderedTabIds.length; j++) {
+		var tabId = orderedTabIds[j];
+		var seen = tabLastSeen[tabId];
+		var isRecent = seen !== undefined && (now - seen) <= ACTIVE_WINDOW_MS;
+		if (isRecent || shown.length < MIN_SWITCHER_TABS) {
+			shown.push(tabId);
 		}
-		return filtered.length > 0 ? filtered : mru; // Fallback to all tabs if window has only 1 tab
-	} catch (e) {
-		log("Error filtering MRU by window: " + e.message);
-		return mru;
 	}
+	log("TabSwitch::Activity window: showing " + shown.length + " of " + orderedTabIds.length + " tabs");
+	return shown;
+};
+
+// Get filtered MRU based on current window setting, then apply the activity window
+var getFilteredMru = async function() {
+	var result = mru;
+	
+	if (currentWindowOnly) {
+		// Get the current window
+		try {
+			var currentWindow = await chrome.windows.getCurrent();
+			var currentWindowId = currentWindow.id;
+			
+			// Filter MRU to only include tabs from current window
+			var filtered = [];
+			for (var i = 0; i < mru.length; i++) {
+				try {
+					var tab = await chrome.tabs.get(mru[i]);
+					if (tab && tab.windowId === currentWindowId) {
+						filtered.push(mru[i]);
+					}
+				} catch (e) {
+					// Tab may have been closed
+				}
+			}
+			result = filtered.length > 0 ? filtered : mru; // Fallback to all tabs if window has only 1 tab
+		} catch (e) {
+			log("Error filtering MRU by window: " + e.message);
+		}
+	}
+	
+	return await applyActivityWindow(result);
 };
 
 // Check if any window from this profile is currently focused
@@ -761,6 +821,23 @@ var handleRequestShowUI = async function(windowOnly) {
 			selectedIndex: intSwitchCount
 		});
 	}
+};
+
+// Handle hover selection from the native switcher UI. Moves the current selection so that
+// releasing the modifier (end_switch) activates the hovered tab, and further Tab presses
+// continue cycling from there.
+var handleNativeSelectIndex = function(index) {
+	if (!nativeSwitchOngoing || !uiShownDuringSwitch) {
+		log("TabSwitch::Ignoring select_index - no switch in progress");
+		return;
+	}
+	if (typeof index !== 'number' || index < 0 || index >= filteredMru.length) {
+		log("TabSwitch::Ignoring select_index - out of range: " + index);
+		return;
+	}
+	intSwitchCount = index;
+	lastIntSwitchIndex = index;
+	log("TabSwitch::SELECT_INDEX from hover: " + index);
 };
 
 var handleNativeEndSwitch = async function() {

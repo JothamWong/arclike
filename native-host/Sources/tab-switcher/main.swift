@@ -1293,6 +1293,68 @@ struct TabInfo: Identifiable {
     let url: String
 }
 
+// MARK: - Switcher Layout
+
+/// Card arrangement for a given tab count. Up to 5 tabs sit in one row; from 6 on, cards split
+/// into two rows with the extra card on top (6 → 3+3, 7 → 4+3, 8 → 4+4, 9 → 5+4, …).
+/// Cards shrink proportionally when a row would be wider than the space available.
+struct SwitcherLayout: Equatable {
+    static let baseCardWidth: CGFloat = 220
+    static let baseCardHeight: CGFloat = 146
+    static let spacing: CGFloat = 12
+    static let padding: CGFloat = 16
+    static let minScale: CGFloat = 0.6
+    
+    static let empty = SwitcherLayout(rowSizes: [], cardWidth: baseCardWidth, cardHeight: baseCardHeight)
+    
+    let rowSizes: [Int]
+    let cardWidth: CGFloat
+    let cardHeight: CGFloat
+    
+    static func compute(tabCount: Int, maxWidth: CGFloat) -> SwitcherLayout {
+        guard tabCount > 0 else { return .empty }
+        let rows: [Int]
+        if tabCount >= 6 {
+            let top = (tabCount + 1) / 2
+            rows = [top, tabCount - top]
+        } else {
+            rows = [tabCount]
+        }
+        let columns = rows.max() ?? 1
+        let available = maxWidth - padding * 2 - CGFloat(columns - 1) * spacing
+        let scale = min(1, max(minScale, available / (CGFloat(columns) * baseCardWidth)))
+        return SwitcherLayout(
+            rowSizes: rows,
+            cardWidth: floor(baseCardWidth * scale),
+            cardHeight: floor(baseCardHeight * scale)
+        )
+    }
+    
+    var columns: Int { rowSizes.max() ?? 0 }
+    
+    var contentWidth: CGFloat {
+        guard columns > 0 else { return 0 }
+        return CGFloat(columns) * cardWidth + CGFloat(columns - 1) * Self.spacing + Self.padding * 2
+    }
+    
+    var contentHeight: CGFloat {
+        let rows = rowSizes.filter { $0 > 0 }.count
+        guard rows > 0 else { return 0 }
+        return CGFloat(rows) * cardHeight + CGFloat(rows - 1) * Self.spacing + Self.padding * 2
+    }
+    
+    /// Tab index range of each row, in reading order (left to right, top to bottom).
+    var rowRanges: [Range<Int>] {
+        var ranges: [Range<Int>] = []
+        var start = 0
+        for size in rowSizes {
+            ranges.append(start..<(start + size))
+            start += size
+        }
+        return ranges
+    }
+}
+
 // MARK: - Tab Switcher State
 
 class TabSwitcherState: ObservableObject {
@@ -1301,9 +1363,19 @@ class TabSwitcherState: ObservableObject {
     @Published var isVisible = false
     @Published var tabs: [TabInfo] = []
     @Published var selectedIndex: Int = 0
+    @Published var layout: SwitcherLayout = .empty
+    
+    /// Set when the selection was changed by hovering, so the view skips auto-scroll.
+    /// Scrolling under a stationary cursor would re-trigger hover on a different card.
+    var selectionChangedByHover = false
+    /// Cursor position when the switcher appeared. Hover is ignored until the cursor moves,
+    /// so a card that happens to sit under the cursor isn't selected by accident.
+    private var mouseLocationAtShow: NSPoint = .zero
     
     func showSwitcher(tabs: [TabInfo], selectedIndex: Int) {
         DispatchQueue.main.async {
+            self.mouseLocationAtShow = NSEvent.mouseLocation
+            self.selectionChangedByHover = false
             self.tabs = tabs
             self.selectedIndex = selectedIndex
             self.isVisible = true
@@ -1312,8 +1384,24 @@ class TabSwitcherState: ObservableObject {
     
     func updateSelection(index: Int) {
         DispatchQueue.main.async {
+            self.selectionChangedByHover = false
             self.selectedIndex = index
         }
+    }
+    
+    /// Called from a tab card's hover tracker (main thread). Selects the hovered card and
+    /// tells the extension, so releasing the modifier switches to that tab.
+    func hoverSelect(index: Int) {
+        guard isVisible, index >= 0, index < tabs.count else { return }
+        let location = NSEvent.mouseLocation
+        if abs(location.x - mouseLocationAtShow.x) < 2 && abs(location.y - mouseLocationAtShow.y) < 2 {
+            return
+        }
+        guard index != selectedIndex else { return }
+        selectionChangedByHover = true
+        selectedIndex = index
+        debugLog("Hover selected index \(index)")
+        sendMessage(["action": "select_index", "index": index])
     }
     
     func hideSwitcher() {
@@ -1433,9 +1521,9 @@ class ToastWindow: NSPanel {
 struct TabCardView: View {
     let tab: TabInfo
     let isSelected: Bool
+    var cardWidth: CGFloat = SwitcherLayout.baseCardWidth
+    var cardHeight: CGFloat = SwitcherLayout.baseCardHeight
     let cornerRadius: CGFloat = 10
-    let cardWidth: CGFloat = 220
-    let cardHeight: CGFloat = 146
     
     var body: some View {
         ZStack(alignment: .top) {
@@ -1535,30 +1623,90 @@ struct AsyncFaviconView: View {
     }
 }
 
+// MARK: - Hover Tracking
+
+/// Reports when the cursor is over a view. Uses an AppKit tracking area with `.activeAlways`
+/// because the switcher panel never becomes key and the app is never active, which makes
+/// SwiftUI's `.onHover` unreliable here.
+final class HoverTrackingNSView: NSView {
+    var onHover: (() -> Void)?
+    private var trackingArea: NSTrackingArea?
+    
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let existing = trackingArea {
+            removeTrackingArea(existing)
+        }
+        let area = NSTrackingArea(
+            rect: .zero,
+            options: [.mouseEnteredAndExited, .mouseMoved, .activeAlways, .inVisibleRect],
+            owner: self,
+            userInfo: nil
+        )
+        addTrackingArea(area)
+        trackingArea = area
+    }
+    
+    override func mouseEntered(with event: NSEvent) { onHover?() }
+    override func mouseMoved(with event: NSEvent) { onHover?() }
+    
+    // Only observes the cursor; never intercepts clicks.
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+}
+
+struct HoverTrackingView: NSViewRepresentable {
+    let onHover: () -> Void
+    
+    func makeNSView(context: Context) -> HoverTrackingNSView {
+        let view = HoverTrackingNSView()
+        view.onHover = onHover
+        return view
+    }
+    
+    func updateNSView(_ nsView: HoverTrackingNSView, context: Context) {
+        nsView.onHover = onHover
+    }
+}
+
 // MARK: - Tab Switcher View
 
 struct TabSwitcherView: View {
     @ObservedObject var state = TabSwitcherState.shared
-    let padding: CGFloat = 16
-    let cardWidth: CGFloat = 220
-    let cardSpacing: CGFloat = 12
     
     var body: some View {
         if state.isVisible && !state.tabs.isEmpty {
+            let layout = state.layout
+            let validIndices = 0..<state.tabs.count
             ScrollViewReader { proxy in
                 ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: cardSpacing) {
-                        ForEach(Array(state.tabs.enumerated()), id: \.element.id) { index, tab in
-                            TabCardView(
-                                tab: tab,
-                                isSelected: index == state.selectedIndex
-                            )
-                            .id(index)
+                    VStack(spacing: SwitcherLayout.spacing) {
+                        ForEach(Array(layout.rowRanges.enumerated()), id: \.offset) { _, range in
+                            HStack(spacing: SwitcherLayout.spacing) {
+                                // Clamp in case the layout briefly lags behind a tab list change
+                                ForEach(range.clamped(to: validIndices), id: \.self) { index in
+                                    TabCardView(
+                                        tab: state.tabs[index],
+                                        isSelected: index == state.selectedIndex,
+                                        cardWidth: layout.cardWidth,
+                                        cardHeight: layout.cardHeight
+                                    )
+                                    .overlay(
+                                        HoverTrackingView { state.hoverSelect(index: index) }
+                                    )
+                                    .id(index)
+                                }
+                            }
                         }
                     }
-                    .padding(padding)
+                    .padding(SwitcherLayout.padding)
                 }
                 .onChange(of: state.selectedIndex) {
+                    // Hover-driven changes happen under the cursor already; scrolling would
+                    // move a different card under it and fight the user.
+                    if state.selectionChangedByHover {
+                        state.selectionChangedByHover = false
+                        return
+                    }
                     withAnimation(.easeOut(duration: 0.1)) {
                         proxy.scrollTo(state.selectedIndex, anchor: .center)
                     }
@@ -1698,6 +1846,7 @@ class TabSwitcherWindow: NSPanel {
         self.hasShadow = true
         self.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         self.isMovableByWindowBackground = false
+        self.acceptsMouseMovedEvents = true // needed for hover tracking on cards
         
         let hostingView = NSHostingView(rootView: TabSwitcherView())
         self.contentView = hostingView
@@ -1810,15 +1959,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                     let tabCount = TabSwitcherState.shared.tabs.count
                     guard tabCount > 0 else { return }
                     
-                    let cardWidth: CGFloat = 220
-                    let cardSpacing: CGFloat = 12
-                    let padding: CGFloat = 16
-                    let cardHeight: CGFloat = 146
-                    
-                    // Calculate content width
-                    let contentWidth = CGFloat(tabCount) * cardWidth + CGFloat(max(0, tabCount - 1)) * cardSpacing + padding * 2
-                    let height: CGFloat = cardHeight + padding * 2
-                    
                     // Get browser window frame
                     let chromeFrame = getBrowserWindowFrame()
                     
@@ -1837,9 +1977,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                         debugLog("Falling back to screen frame: \(targetFrame)")
                     }
                     
-                    // Calculate width - fit within target, with max limit
+                    // Lay out cards (rows + size) to fit within target, with max limit
                     let maxWidth = min(targetFrame.width - 40, 1200) // 20px margin on each side
-                    let width = min(contentWidth, maxWidth)
+                    let layout = SwitcherLayout.compute(tabCount: tabCount, maxWidth: maxWidth)
+                    TabSwitcherState.shared.layout = layout
+                    let width = min(layout.contentWidth, maxWidth)
+                    let height = layout.contentHeight
+                    debugLog("Layout rows=\(layout.rowSizes) card=\(layout.cardWidth)x\(layout.cardHeight)")
                     
                     self?.window?.setContentSize(NSSize(width: width, height: height))
                     
@@ -1979,6 +2123,9 @@ func debugLog(_ message: String) {
 
 // MARK: - Native Messaging Protocol
 
+// Serializes stdout writes so messages sent from different threads can't interleave
+let sendMessageLock = NSLock()
+
 func sendMessage(_ dict: [String: Any]) {
     guard let jsonData = try? JSONSerialization.data(withJSONObject: dict, options: []) else {
         debugLog("Failed to serialize message")
@@ -1988,8 +2135,10 @@ func sendMessage(_ dict: [String: Any]) {
     var length = UInt32(jsonData.count).littleEndian
     let lengthData = Data(bytes: &length, count: 4)
     
+    sendMessageLock.lock()
     FileHandle.standardOutput.write(lengthData)
     FileHandle.standardOutput.write(jsonData)
+    sendMessageLock.unlock()
 }
 
 func sendAction(_ action: String) {
