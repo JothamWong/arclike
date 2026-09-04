@@ -2436,7 +2436,7 @@ func detectParentBrowser() -> (String, pid_t)? {
     return nil
 }
 var showUITimer: DispatchWorkItem? = nil
-let showUIDelay: Double = 0.15 // 150ms delay before showing UI
+let showUIDelay: Double = 0.01 // 10ms delay before showing UI
 
 // Lock file for event tap coordination - only one native host should have the event tap
 let eventTapLockFile = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".tabswitcher_eventtap.lock")
