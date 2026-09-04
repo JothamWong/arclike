@@ -2507,6 +2507,7 @@ func cleanupEventTapLock() {
 // Distributed notification names for IPC between native hosts
 let ctrlTabNotificationName = "com.tabswitcher.ctrlTab"
 let ctrlReleaseNotificationName = "com.tabswitcher.ctrlRelease"
+let ctrlCancelNotificationName = "com.tabswitcher.ctrlCancel"
 let leaderResignedNotificationName = "com.tabswitcher.leaderResigned"
 let showConfigNotificationName = "com.tabswitcher.showConfig"
 let copyUrlNotificationName = "com.tabswitcher.copyUrl"
@@ -2552,6 +2553,22 @@ func setupNotificationListener() {
         
         debugLog("Received ctrl-release notification")
         sendAction("end_switch")
+    }
+    
+    center.addObserver(forName: NSNotification.Name(ctrlCancelNotificationName), object: nil, queue: .main) { notification in
+        // Only respond if this is for our browser
+        if let userInfo = notification.userInfo,
+           let targetBrowser = userInfo["targetBrowser"] as? String {
+            guard let myBrowser = ownerBrowserBundleId, myBrowser == targetBrowser else {
+                return
+            }
+        }
+        
+        debugLog("Received ctrl-cancel notification")
+        // Hide our panel right away so Esc feels instant and still works if the extension
+        // predates cancel_switch; the extension's own hide_switcher is then a no-op.
+        TabSwitcherState.shared.hideSwitcher()
+        sendAction("cancel_switch")
     }
     
     center.addObserver(forName: NSNotification.Name("com.tabswitcher.requestShowUI"), object: nil, queue: .main) { notification in
@@ -2733,6 +2750,21 @@ func postCtrlReleaseNotification() {
     )
 }
 
+// Esc was pressed while the switch modifier was held: the extension should dismiss the
+// switcher and leave the current tab alone.
+func postCtrlCancelNotification() {
+    guard let frontmostBrowser = getFrontmostBrowserBundleId() else { return }
+    
+    let center = DistributedNotificationCenter.default()
+    center.postNotificationName(
+        NSNotification.Name(ctrlCancelNotificationName),
+        object: nil,
+        userInfo: ["targetBrowser": frontmostBrowser],
+        deliverImmediately: true
+    )
+    debugLog("Posted ctrl-cancel notification for browser: \(frontmostBrowser)")
+}
+
 func postRequestShowUINotification(combineWindows: Bool) {
     guard let frontmostBrowser = getFrontmostBrowserBundleId() else { return }
     
@@ -2818,6 +2850,18 @@ func eventTapCallback(
 
     // Handle key down events
     if type == .keyDown {
+        // Esc while the switch modifier is still held: cancel the switch without changing tabs.
+        // switchInProgress is cleared here, so the eventual modifier release posts nothing.
+        if switchInProgress && keyCode == Int64(kVK_Escape) && flags.contains(switchModFlag) {
+            debugLog("Escape pressed during switch - cancelling")
+            showUITimer?.cancel()
+            showUITimer = nil
+            postCtrlCancelNotification()
+            switchInProgress = false
+            tabPressCount = 0
+            return nil
+        }
+
         // Check for tab-switch shortcut (Shift excluded from base match — it toggles direction)
         let baseMods = tabSwitchModifiers & modifierMask & ~CGEventFlags.maskShift.rawValue
         let currentBase = currentMods & ~CGEventFlags.maskShift.rawValue

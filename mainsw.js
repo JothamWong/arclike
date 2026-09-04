@@ -599,6 +599,8 @@ var connectNativeHost = function() {
 				handleRequestShowUI(message.current_window_only);
 			} else if (message.action === "end_switch") {
 				handleNativeEndSwitch();
+			} else if (message.action === "cancel_switch") {
+				handleNativeCancelSwitch();
 			} else if (message.action === "select_index") {
 				handleNativeSelectIndex(message.index);
 			} else if (message.action === "copy_url") {
@@ -882,6 +884,26 @@ var handleNativeEndSwitch = async function() {
 		filteredMru = [];
 		currentWindowOnly = false;
 	}
+};
+
+// Esc was pressed while the modifier was still held. Dismiss the switcher and forget the
+// in-progress selection; the active tab and the MRU are left exactly as they were.
+var handleNativeCancelSwitch = function() {
+	log("TabSwitch::NATIVE_CANCEL_SWITCH");
+	if (!nativeSwitchOngoing) {
+		return;
+	}
+	if (uiShownDuringSwitch) {
+		sendToNativeHost({
+			action: "hide_switcher"
+		});
+	}
+	uiShownDuringSwitch = false;
+	nativeSwitchOngoing = false;
+	intSwitchCount = 0;
+	lastIntSwitchIndex = 0;
+	filteredMru = [];
+	currentWindowOnly = false;
 };
 
 var handleCopyUrl = async function() {

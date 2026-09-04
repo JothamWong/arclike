@@ -16,7 +16,7 @@
 
 ## How It Works
 
-Hold **Ctrl** and press **Tab** to bring up the visual switcher. Keep holding Ctrl and press Tab repeatedly to cycle through your tabs. Release Ctrl to switch to the selected tab.
+Hold **Ctrl** and press **Tab** to bring up the visual switcher. Keep holding Ctrl and press Tab repeatedly to cycle through your tabs. Release Ctrl to switch to the selected tab, or press Esc while still holding Ctrl to close the switcher and stay where you are.
 
 Press **Cmd+Shift+C** to instantly copy the active tab's URL to your clipboard.
 
@@ -57,6 +57,7 @@ If not prompted automatically:
 |----------|--------|
 | **Ctrl+Tab** | Open switcher, cycle forward |
 | **Ctrl+Shift+Tab** | Cycle backward |
+| **Ctrl+Esc** | Close switcher without switching |
 | **Cmd+Shift+C** | Copy current tab URL |
 | **Alt+W** | Quick switch to last tab (no UI) |
 
