@@ -15,7 +15,7 @@ var initialized = false;
 // ACTIVE_WINDOW_MS, plus enough of the most recently used tabs to always show at least
 // MIN_SWITCHER_TABS (when that many exist). The full MRU is still tracked underneath.
 var MIN_SWITCHER_TABS = 2;
-var ACTIVE_WINDOW_MS = 3 * 60 * 1000;
+var ACTIVE_WINDOW_MS = 5 * 60 * 1000;
 var tabLastSeen = {};        // tabId -> timestamp (ms) the tab was last on screen
 var activeTabByWindow = {};  // windowId -> tabId currently active in that window
 
