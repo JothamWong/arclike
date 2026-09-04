@@ -329,7 +329,7 @@ chrome.tabs.onUpdated.addListener(function(tabId, changeInfo, tab) {
 
 chrome.tabs.onCreated.addListener(function(tab) {
 	log("Tab create event fired with tab("+tab.id+")");
-	addTabToMRUAtBack(tab.id);
+	addTabToMRUAfterCurrent(tab);
 });
 
 chrome.tabs.onRemoved.addListener(function(tabId, removedInfo) {
@@ -350,14 +350,30 @@ chrome.tabs.onRemoved.addListener(function(tabId, removedInfo) {
 });
 
 
-var addTabToMRUAtBack = function(tabId) {
-
-	var index = mru.indexOf(tabId);
-	if(index == -1) {
-		//add to the end of mru
-		mru.splice(-1, 0, tabId);
+// Insert a newly created tab directly behind the tab it was opened from, so with MRU
+// [1, 2, 3] a Cmd+click on tab 1 that opens tab 4 gives [1, 4, 2, 3]. The opener is
+// preferred; failing that, the active tab of the new tab's window, then the MRU head. If
+// the tab is opened in the foreground, onActivated then moves it to the front as usual.
+// The new tab also counts as seen now, so the switcher's activity window shows it.
+var addTabToMRUAfterCurrent = function(tab) {
+	if (mru.indexOf(tab.id) !== -1) {
+		return;
 	}
-
+	var anchors = [tab.openerTabId, activeTabByWindow[tab.windowId], mru[0]];
+	var insertAt = mru.length;
+	for (var i = 0; i < anchors.length; i++) {
+		if (anchors[i] === undefined) {
+			continue;
+		}
+		var anchorIndex = mru.indexOf(anchors[i]);
+		if (anchorIndex !== -1) {
+			insertAt = anchorIndex + 1;
+			break;
+		}
+	}
+	mru.splice(insertAt, 0, tab.id);
+	tabLastSeen[tab.id] = Date.now();
+	log("Tab(" + tab.id + ") inserted into MRU at " + insertAt + ": " + mru);
 }
 	
 var addTabToMRUAtFront = function(tabId) {
