@@ -1618,7 +1618,8 @@ struct AsyncFaviconView: View {
         guard !url.isEmpty, let faviconURL = URL(string: url) else { return }
         
         URLSession.shared.dataTask(with: faviconURL) { data, _, _ in
-            if let data = data, let loadedImage = downsampleImage(data, maxPixelSize: 72) {
+            if let data = data,
+               let loadedImage = downsampleImage(data, maxPixelSize: 72) ?? NSImage(data: data) {
                 DispatchQueue.main.async {
                     self.image = loadedImage
                 }
@@ -2294,6 +2295,9 @@ func parseTabInfo(_ dict: [String: Any]) -> TabInfo? {
        let imageData = Data(base64Encoded: dataUrl) {
         // Cards are at most 220 points wide, so a Retina-sized preview is enough. Decoding
         // the full 4K screenshot is what made the helper retain hundreds of MB of surfaces.
+        // Deliberately no NSImage(data:) fallback here: previews are always JPEG, and falling
+        // back would reintroduce the full-size decode this avoids. A card without a preview
+        // still renders its title and favicon.
         thumbnail = downsampleImage(imageData, maxPixelSize: 440)
     }
     
@@ -2909,6 +2913,10 @@ func setupEventTap() -> Bool {
         return false
     }
     
+    // The callback is a C function pointer and can only reach globals, so the port has to be
+    // stored here for the .tapDisabledByTimeout branch to re-enable it.
+    keyboardEventTap = eventTap
+
     let runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, eventTap, 0)
     CFRunLoopAddSource(CFRunLoopGetMain(), runLoopSource, .commonModes)
     CGEvent.tapEnable(tap: eventTap, enable: true)
