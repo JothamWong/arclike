@@ -1806,27 +1806,38 @@ func getWindowFrame(_ window: AXUIElement) -> NSRect? {
         return nil
     }
     
-    // Convert from top-left origin (Accessibility) to bottom-left origin (NSWindow)
-    // Need to find which screen the window is on
-    var screenHeight: CGFloat = 0
-    for screen in NSScreen.screens {
-        if screen.frame.contains(CGPoint(x: position.x + size.width/2, y: position.y + size.height/2)) ||
-           screen.frame.contains(position) {
-            screenHeight = screen.frame.maxY
-            break
-        }
-    }
-    
-    // If we couldn't find the screen, use main screen
-    if screenHeight == 0 {
-        screenHeight = NSScreen.main?.frame.maxY ?? 0
-    }
-    
-    let convertedY = screenHeight - position.y - size.height
+    // Convert from top-left origin (Accessibility) to bottom-left origin (NSWindow). Both are
+    // global coordinate spaces anchored to the primary display (NSScreen.screens[0], origin
+    // (0, 0)), so the flip is always around the primary display's height regardless of which
+    // display the window is on. NSScreen.main must not be used here: with no key window it
+    // follows whichever display the user is active on, which pushed the switcher off-screen
+    // whenever the browser was on a display above the primary one.
+    let primaryHeight = NSScreen.screens.first?.frame.height ?? 0
+    let convertedY = primaryHeight - position.y - size.height
     
     debugLog("Chrome window: pos=(\(position.x), \(position.y)) size=\(size) convertedY=\(convertedY)")
     
     return NSRect(x: position.x, y: convertedY, width: size.width, height: size.height)
+}
+
+/// The screen containing the centre of `rect`, else the screen it overlaps most, else nil.
+func screenContaining(_ rect: NSRect) -> NSScreen? {
+    let center = NSPoint(x: rect.midX, y: rect.midY)
+    if let screen = NSScreen.screens.first(where: { $0.frame.contains(center) }) {
+        return screen
+    }
+    func overlap(_ screen: NSScreen) -> CGFloat {
+        let i = screen.frame.intersection(rect)
+        return i.isNull ? 0 : i.width * i.height
+    }
+    return NSScreen.screens.max { overlap($0) < overlap($1) }
+}
+
+/// Clamp a window origin so the span [origin, origin + length] stays inside `range`. If the span
+/// is longer than the range, the lower edge wins.
+func clampOrigin(_ origin: CGFloat, length: CGFloat, within range: ClosedRange<CGFloat>) -> CGFloat {
+    let maxOrigin = max(range.lowerBound, range.upperBound - length)
+    return min(max(origin, range.lowerBound), maxOrigin)
 }
 
 // MARK: - Floating Window
@@ -1962,8 +1973,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                     // Get browser window frame
                     let chromeFrame = getBrowserWindowFrame()
                     
-                    // Always get main screen as fallback
-                    guard let mainScreen = NSScreen.main else { return }
+                    // Fallback when the browser frame is unavailable: the display the user is on
+                    guard let fallbackScreen = NSScreen.main ?? NSScreen.screens.first else { return }
                     
                     // Use browser frame if available and valid, otherwise use screen
                     let targetFrame: NSRect
@@ -1973,7 +1984,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                         targetFrame = frame
                         debugLog("Using browser window frame: \(frame)")
                     } else {
-                        targetFrame = mainScreen.visibleFrame
+                        targetFrame = fallbackScreen.visibleFrame
                         debugLog("Falling back to screen frame: \(targetFrame)")
                     }
                     
@@ -1991,9 +2002,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                     let x = targetFrame.origin.x + (targetFrame.width - width) / 2
                     let y = targetFrame.origin.y + (targetFrame.height - height) / 2 + targetFrame.height * 0.08 // Slightly above center
                     
-                    // Ensure position is valid
-                    let finalX = max(0, x)
-                    let finalY = max(0, y)
+                    // Keep the switcher on the display the browser window is on. Displays left of
+                    // or below the primary one have negative coordinates, so clamping to 0 would
+                    // drag the switcher onto the primary display.
+                    let bounds = (screenContaining(targetFrame) ?? fallbackScreen).visibleFrame
+                    let finalX = clampOrigin(x, length: width, within: bounds.minX...bounds.maxX)
+                    let finalY = clampOrigin(y, length: height, within: bounds.minY...bounds.maxY)
                     
                     self?.window?.setFrameOrigin(NSPoint(x: finalX, y: finalY))
                     self?.window?.orderFront(nil)
