@@ -18,6 +18,8 @@
 
 Hold **Ctrl** and press **Tab** to bring up the visual switcher. Keep holding Ctrl and press Tab repeatedly to cycle through your tabs. Release Ctrl to switch to the selected tab, or press Esc while still holding Ctrl to close the switcher and stay where you are.
 
+The switcher appears on the first keypress. Hover a card to select it, then release Ctrl to switch to it or keep pressing Tab to carry on cycling from there.
+
 Press **Cmd+Shift+C** to instantly copy the active tab's URL to your clipboard.
 
 Works exactly like macOS app switching (Cmd+Tab), but for your browser tabs.
@@ -98,6 +100,21 @@ The app bundle will be at `dist/Tab Switcher.app`. Code signing and notarization
 ./build.sh --sign --notarize   # build + sign + notarize
 ```
 
+## Background resource usage
+
+Previews are downsampled to at most 440 pixels before they are cached or sent to the app, and
+the cache is bounded both by count and by total encoded size. Captures are debounced and only
+run for the active tab of a focused window. The app decodes previews straight to thumbnail
+size, releases them when the switcher closes, and drains temporaries after every message.
+
+## Tests
+
+The switcher's service-worker logic runs under Node with stubbed browser APIs:
+
+```bash
+node --test tests/switcher.test.cjs
+```
+
 ## Project Structure
 
 ```
@@ -105,6 +122,7 @@ The app bundle will be at `dist/Tab Switcher.app`. Code signing and notarization
 ├── mainsw.js              # Extension service worker
 ├── popup.html/js          # Extension popup UI
 ├── icon*.png              # Extension icons
+├── tests/                 # Node tests for the service worker's switch logic
 ├── native-host/
 │   ├── Package.swift      # Swift package definition
 │   ├── Sources/

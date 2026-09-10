@@ -5,6 +5,7 @@ import Carbon.HIToolbox
 import ApplicationServices
 import Sparkle
 import UserNotifications
+import ImageIO
 
 let APP_VERSION = "3.7.5"
 let CWS_EXTENSION_ID = "pbpgegamabjlnegmfcjelciaenfkmfoo"
@@ -1401,12 +1402,15 @@ class TabSwitcherState: ObservableObject {
         selectionChangedByHover = true
         selectedIndex = index
         debugLog("Hover selected index \(index)")
-        sendMessage(["action": "select_index", "index": index])
+        sendMessage(["action": "select_tab", "tabId": tabs[index].id])
     }
     
     func hideSwitcher() {
         DispatchQueue.main.async {
             self.isVisible = false
+            self.tabs = []
+            self.selectedIndex = 0
+            self.layout = .empty
         }
     }
 }
@@ -1614,7 +1618,7 @@ struct AsyncFaviconView: View {
         guard !url.isEmpty, let faviconURL = URL(string: url) else { return }
         
         URLSession.shared.dataTask(with: faviconURL) { data, _, _ in
-            if let data = data, let loadedImage = NSImage(data: data) {
+            if let data = data, let loadedImage = downsampleImage(data, maxPixelSize: 72) {
                 DispatchQueue.main.async {
                     self.image = loadedImage
                 }
@@ -1746,6 +1750,12 @@ struct VisualEffectView: NSViewRepresentable {
 
 // MARK: - Get Browser Window Frame
 
+/// The display that anchors the global coordinate space. Its origin is (0, 0) in AppKit
+/// coordinates and its top edge is y = 0 in WindowServer and Accessibility coordinates.
+func primaryScreen() -> NSScreen? {
+    return NSScreen.screens.first(where: { $0.frame.origin == .zero }) ?? NSScreen.screens.first
+}
+
 func getBrowserWindowFrame() -> NSRect? {
     // First check if a supported browser is the frontmost app
     guard let frontApp = NSWorkspace.shared.frontmostApplication,
@@ -1754,70 +1764,37 @@ func getBrowserWindowFrame() -> NSRect? {
         debugLog("No supported browser is frontmost")
         return nil
     }
-    
-    // Get Chrome's windows using Accessibility API
-    let appElement = AXUIElementCreateApplication(frontApp.processIdentifier)
-    
-    // Try to get the focused window first
-    var focusedWindowRef: CFTypeRef?
-    if AXUIElementCopyAttributeValue(appElement, kAXFocusedWindowAttribute as CFString, &focusedWindowRef) == .success,
-       let focusedWindow = focusedWindowRef {
-        if let frame = getWindowFrame(focusedWindow as! AXUIElement) {
-            return frame
-        }
-    }
-    
-    // Fall back to first window in the list
-    var windowsRef: CFTypeRef?
-    guard AXUIElementCopyAttributeValue(appElement, kAXWindowsAttribute as CFString, &windowsRef) == .success,
-          let windows = windowsRef as? [AXUIElement],
-          let frontWindow = windows.first else {
-        debugLog("Could not get Chrome windows")
-        return nil
-    }
-    
-    return getWindowFrame(frontWindow)
-}
 
-func getWindowFrame(_ window: AXUIElement) -> NSRect? {
-    var positionRef: CFTypeRef?
-    var sizeRef: CFTypeRef?
-    
-    guard AXUIElementCopyAttributeValue(window, kAXPositionAttribute as CFString, &positionRef) == .success,
-          AXUIElementCopyAttributeValue(window, kAXSizeAttribute as CFString, &sizeRef) == .success,
-          let posVal = positionRef,
-          let sizeVal = sizeRef else {
-        debugLog("Could not get window position/size")
+    // WindowServer geometry, rather than a synchronous Accessibility request to the browser
+    // while it is still processing the keyboard event we just intercepted.
+    guard let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]],
+          let desktopTop = primaryScreen()?.frame.maxY else {
+        debugLog("Could not read the window list")
         return nil
     }
-    
-    var position = CGPoint.zero
-    var size = CGSize.zero
-    
-    guard AXValueGetValue(posVal as! AXValue, .cgPoint, &position),
-          AXValueGetValue(sizeVal as! AXValue, .cgSize, &size) else {
-        debugLog("Could not extract position/size values")
-        return nil
+
+    // The list is front to back, so the first match is the frontmost browser window.
+    for window in windows {
+        guard window[kCGWindowOwnerPID as String] as? pid_t == frontApp.processIdentifier,
+              window[kCGWindowLayer as String] as? Int == 0,
+              let bounds = window[kCGWindowBounds as String] as? [String: Any],
+              let frame = CGRect(dictionaryRepresentation: bounds as CFDictionary),
+              frame.width > 100, frame.height > 100 else { continue }
+
+        // Flip from a top-left origin to a bottom-left origin. Both spaces are global and
+        // anchored to the primary display, so the flip is always around that display's top
+        // edge, whichever display the window is on. NSScreen.main must not be used here: with
+        // no key window it follows whichever display the user is active on, which placed the
+        // switcher a full screen height away when the browser sat on a display above the
+        // primary one.
+        let converted = NSRect(x: frame.minX, y: desktopTop - frame.maxY,
+                               width: frame.width, height: frame.height)
+        debugLog("Browser window: cg=\(frame) -> cocoa=\(converted)")
+        return converted
     }
-    
-    // Sanity check - window should have reasonable size
-    guard size.width > 100 && size.height > 100 else {
-        debugLog("Window size too small: \(size)")
-        return nil
-    }
-    
-    // Convert from top-left origin (Accessibility) to bottom-left origin (NSWindow). Both are
-    // global coordinate spaces anchored to the primary display (NSScreen.screens[0], origin
-    // (0, 0)), so the flip is always around the primary display's height regardless of which
-    // display the window is on. NSScreen.main must not be used here: with no key window it
-    // follows whichever display the user is active on, which pushed the switcher off-screen
-    // whenever the browser was on a display above the primary one.
-    let primaryHeight = NSScreen.screens.first?.frame.height ?? 0
-    let convertedY = primaryHeight - position.y - size.height
-    
-    debugLog("Chrome window: pos=(\(position.x), \(position.y)) size=\(size) convertedY=\(convertedY)")
-    
-    return NSRect(x: position.x, y: convertedY, width: size.width, height: size.height)
+
+    debugLog("No browser window found in the window list")
+    return nil
 }
 
 /// The screen containing the centre of `rect`, else the screen it overlaps most, else nil.
@@ -1888,15 +1865,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Setup macOS system notifications for background update checking
         BackgroundUpdateChecker.shared.setupNotifications()
         
-        // Create the floating window for tab switching UI
-        window = TabSwitcherWindow()
-        toastWindow = ToastWindow()
-        debugLog("Window created")
+        // Floating windows are created on first use. Every profile runs a helper, but only
+        // the one owning the focused browser ever shows a switcher.
 
         // Observe toast visibility
         toastCancellable = ToastManager.shared.$isVisible.sink { [weak self] isVisible in
             DispatchQueue.main.async {
                 if isVisible {
+                    if self?.toastWindow == nil { self?.toastWindow = ToastWindow() }
                     let toastWidth: CGFloat = 290
                     let toastHeight: CGFloat = 54
                     let bottomMargin: CGFloat = 20
@@ -1916,6 +1892,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                     self?.toastWindow?.orderFront(nil)
                 } else {
                     self?.toastWindow?.orderOut(nil)
+                    self?.toastWindow = nil
                 }
             }
         }
@@ -1965,10 +1942,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             debugLog("Visibility changed to: \(isVisible)")
             DispatchQueue.main.async {
                 if isVisible {
+                    let startedAt = DispatchTime.now().uptimeNanoseconds
                     debugLog("Showing window with \(TabSwitcherState.shared.tabs.count) tabs")
                     
                     let tabCount = TabSwitcherState.shared.tabs.count
                     guard tabCount > 0 else { return }
+                    // Kept alive after the first switch: rebuilding the panel and its SwiftUI
+                    // hosting view sits directly on the path between the keypress and the first
+                    // frame. The previews are released on hide instead, which is where the
+                    // memory actually was.
+                    if self?.window == nil { self?.window = TabSwitcherWindow() }
                     
                     // Get browser window frame
                     let chromeFrame = getBrowserWindowFrame()
@@ -2011,7 +1994,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                     
                     self?.window?.setFrameOrigin(NSPoint(x: finalX, y: finalY))
                     self?.window?.orderFront(nil)
-                    debugLog("Window positioned at (\(finalX), \(finalY)) with size \(width)x\(height)")
+                    let elapsedMs = Double(DispatchTime.now().uptimeNanoseconds - startedAt) / 1_000_000
+                    debugLog("Window positioned at (\(finalX), \(finalY)) with size \(width)x\(height) in \(elapsedMs) ms")
                 } else {
                     debugLog("Hiding window")
                     self?.window?.orderOut(nil)
@@ -2159,10 +2143,15 @@ func sendAction(_ action: String) {
     sendMessage(["action": action])
 }
 
+// Set once stdin reaches EOF, which is the browser closing the connection. A message that
+// simply fails to parse must not be mistaken for this.
+var stdinClosed = false
+
 func readMessage() -> [String: Any]? {
     let lengthData = FileHandle.standardInput.readData(ofLength: 4)
     guard lengthData.count == 4 else { 
         // Connection closed (EOF) - extension disconnected
+        stdinClosed = true
         debugLog("Connection closed (EOF on stdin) - extension disconnected, exiting...")
         // Exit the app when the extension disconnects
         // This is critical for multi-profile support - prevents orphan processes
@@ -2274,6 +2263,21 @@ func handleMessage(_ message: [String: Any]) {
     }
 }
 
+/// Decode `data` straight to a thumbnail no larger than `maxPixelSize`, so the full-size
+/// image is never materialised.
+func downsampleImage(_ data: Data, maxPixelSize: Int) -> NSImage? {
+    guard let source = CGImageSourceCreateWithData(data as CFData, [
+        kCGImageSourceShouldCache: false
+    ] as CFDictionary),
+    let image = CGImageSourceCreateThumbnailAtIndex(source, 0, [
+        kCGImageSourceCreateThumbnailFromImageAlways: true,
+        kCGImageSourceCreateThumbnailWithTransform: true,
+        kCGImageSourceThumbnailMaxPixelSize: maxPixelSize,
+        kCGImageSourceShouldCacheImmediately: true
+    ] as CFDictionary) else { return nil }
+    return NSImage(cgImage: image, size: NSSize(width: image.width, height: image.height))
+}
+
 func parseTabInfo(_ dict: [String: Any]) -> TabInfo? {
     guard let id = dict["id"] as? Int,
           let title = dict["title"] as? String else {
@@ -2288,7 +2292,9 @@ func parseTabInfo(_ dict: [String: Any]) -> TabInfo? {
        !thumbnailData.isEmpty,
        let dataUrl = thumbnailData.components(separatedBy: ",").last,
        let imageData = Data(base64Encoded: dataUrl) {
-        thumbnail = NSImage(data: imageData)
+        // Cards are at most 220 points wide, so a Retina-sized preview is enough. Decoding
+        // the full 4K screenshot is what made the helper retain hundreds of MB of surfaces.
+        thumbnail = downsampleImage(imageData, maxPixelSize: 440)
     }
     
     return TabInfo(id: id, title: title, favIconUrl: favIconUrl, thumbnail: thumbnail, url: url)
@@ -2449,8 +2455,6 @@ func detectParentBrowser() -> (String, pid_t)? {
     debugLog("Could not detect parent browser after walking tree")
     return nil
 }
-var showUITimer: DispatchWorkItem? = nil
-let showUIDelay: Double = 0.01 // 10ms delay before showing UI
 
 // Lock file for event tap coordination - only one native host should have the event tap
 let eventTapLockFile = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".tabswitcher_eventtap.lock")
@@ -2585,23 +2589,6 @@ func setupNotificationListener() {
         sendAction("cancel_switch")
     }
     
-    center.addObserver(forName: NSNotification.Name("com.tabswitcher.requestShowUI"), object: nil, queue: .main) { notification in
-        guard let userInfo = notification.userInfo,
-              let combineWindows = userInfo["combineWindows"] as? Bool else {
-            return
-        }
-        
-        // Only respond if this is for our browser
-        if let targetBrowser = userInfo["targetBrowser"] as? String {
-            guard let myBrowser = ownerBrowserBundleId, myBrowser == targetBrowser else {
-                return
-            }
-        }
-        
-        debugLog("Received request-show-ui notification")
-        sendMessage(["action": "request_show_ui", "current_window_only": !combineWindows])
-    }
-    
     // Listen for leader resignation - try to become the new leader
     center.addObserver(forName: NSNotification.Name(leaderResignedNotificationName), object: nil, queue: .main) { _ in
         debugLog("Received leader-resigned notification")
@@ -2686,7 +2673,11 @@ func setupNotificationListener() {
     // Periodic check for dead leader (backup in case leader crashes without notification)
     // Only do this for non-leaders that were launched via native messaging
     if !isEventTapLeader {
-        Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { _ in
+        let recoveryTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { timer in
+            if isEventTapLeader {
+                timer.invalidate()
+                return
+            }
             // Check if the current leader is still alive
             if FileManager.default.fileExists(atPath: eventTapLockFile.path) {
                 if let contents = try? String(contentsOf: eventTapLockFile, encoding: .utf8),
@@ -2713,6 +2704,9 @@ func setupNotificationListener() {
                 }
             }
         }
+        // This only backs up the resignation notification, so let the system batch it with
+        // other timers rather than waking the process on the exact second.
+        recoveryTimer.tolerance = 1.0
     }
 }
 
@@ -2779,18 +2773,6 @@ func postCtrlCancelNotification() {
     debugLog("Posted ctrl-cancel notification for browser: \(frontmostBrowser)")
 }
 
-func postRequestShowUINotification(combineWindows: Bool) {
-    guard let frontmostBrowser = getFrontmostBrowserBundleId() else { return }
-    
-    let center = DistributedNotificationCenter.default()
-    center.postNotificationName(
-        NSNotification.Name("com.tabswitcher.requestShowUI"),
-        object: nil,
-        userInfo: ["combineWindows": combineWindows, "targetBrowser": frontmostBrowser],
-        deliverImmediately: true
-    )
-}
-
 func postCopyUrlNotification() {
     guard let frontmostBrowser = getFrontmostBrowserBundleId() else { return }
 
@@ -2815,9 +2797,8 @@ func eventTapCallback(
     
     // Handle tap disabled
     if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
-        if let refcon = refcon {
-            let tapRef = Unmanaged<AnyObject>.fromOpaque(refcon).takeUnretainedValue() as! CFMachPort
-            CGEvent.tapEnable(tap: tapRef, enable: true)
+        if let tap = keyboardEventTap {
+            CGEvent.tapEnable(tap: tap, enable: true)
         }
         return Unmanaged.passRetained(event)
     }
@@ -2851,8 +2832,6 @@ func eventTapCallback(
 
         // Detect switch modifier release
         if switchModifierIsPressed && !modifierNowPressed && switchInProgress {
-            showUITimer?.cancel()
-            showUITimer = nil
             postCtrlReleaseNotification()
             switchInProgress = false
             tabPressCount = 0
@@ -2868,8 +2847,6 @@ func eventTapCallback(
         // switchInProgress is cleared here, so the eventual modifier release posts nothing.
         if switchInProgress && keyCode == Int64(kVK_Escape) && flags.contains(switchModFlag) {
             debugLog("Escape pressed during switch - cancelling")
-            showUITimer?.cancel()
-            showUITimer = nil
             postCtrlCancelNotification()
             switchInProgress = false
             tabPressCount = 0
@@ -2892,19 +2869,10 @@ func eventTapCallback(
 
             debugLog("Broadcasting tab switch: direction=\(direction), tabPressCount=\(tabPressCount)")
 
-            if tabPressCount == 1 {
-                postCtrlTabNotification(direction: direction, showUI: false, combineWindows: combineWindows)
-                showUITimer?.cancel()
-                let timer = DispatchWorkItem {
-                    postRequestShowUINotification(combineWindows: combineWindows)
-                }
-                showUITimer = timer
-                DispatchQueue.main.asyncAfter(deadline: .now() + showUIDelay, execute: timer)
-            } else {
-                showUITimer?.cancel()
-                showUITimer = nil
-                postCtrlTabNotification(direction: direction, showUI: true, combineWindows: combineWindows)
-            }
+            // showUI stays true for every press. An extension that predates this change reads
+            // the flag and shows the switcher on the first press instead of waiting for a
+            // request that no longer comes.
+            postCtrlTabNotification(direction: direction, showUI: true, combineWindows: combineWindows)
 
             return nil
         }
@@ -2922,6 +2890,8 @@ func eventTapCallback(
 }
 
 // MARK: - Setup Event Tap
+
+var keyboardEventTap: CFMachPort?
 
 func setupEventTap() -> Bool {
     let eventMask: CGEventMask = (1 << CGEventType.keyDown.rawValue) |
@@ -2951,14 +2921,21 @@ func setupEventTap() -> Bool {
 func startMessageReader() {
     debugLog("Starting message reader thread")
     DispatchQueue.global(qos: .userInitiated).async {
-        while true {
-            if let message = readMessage() {
-                handleMessage(message)
-            } else {
-                // Short sleep to prevent busy waiting
-                Thread.sleep(forTimeInterval: 0.01)
+        // This block lives for the whole connection, so temporaries created while decoding a
+        // message would otherwise be held until it returns, which is never. Draining a pool
+        // per message is what stops image and Foundation temporaries accumulating.
+        while !stdinClosed {
+            autoreleasepool {
+                if let message = readMessage() {
+                    handleMessage(message)
+                } else if !stdinClosed {
+                    // A message that could not be parsed, not a closed pipe. Skip it; only EOF
+                    // ends the loop, and readMessage terminates the app in that case.
+                    Thread.sleep(forTimeInterval: 0.01)
+                }
             }
         }
+        debugLog("Message reader stopped: the browser closed the connection")
     }
 }
 
