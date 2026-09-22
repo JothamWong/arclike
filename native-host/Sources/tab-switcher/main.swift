@@ -1757,6 +1757,81 @@ func primaryScreen() -> NSScreen? {
     return NSScreen.screens.first(where: { $0.frame.origin == .zero }) ?? NSScreen.screens.first
 }
 
+/// Flip a top-left-origin global rect (Accessibility or WindowServer) to AppKit's
+/// bottom-left-origin space. Both spaces are anchored to the primary display, so the flip is
+/// always around that display's top edge, whichever display the window is on. NSScreen.main
+/// must not be used here: with no key window it follows whichever display the user is active
+/// on, which placed the switcher a full screen height away when the browser sat on a display
+/// above the primary one.
+func flipToAppKit(topLeftOrigin: CGPoint, size: CGSize, desktopTop: CGFloat) -> NSRect {
+    return NSRect(x: topLeftOrigin.x, y: desktopTop - topLeftOrigin.y - size.height,
+                  width: size.width, height: size.height)
+}
+
+/// The window the user is actually typing into, via Accessibility.
+///
+/// This is not the same as the frontmost window in WindowServer's z-order. With a browser
+/// window open on more than one display, that list keeps the window on the display holding the
+/// menu bar ahead of the focused one, so choosing by z-order opened the switcher on the wrong
+/// display whenever the focused window was somewhere else.
+func focusedBrowserWindowFrame(pid: pid_t, desktopTop: CGFloat) -> NSRect? {
+    let appElement = AXUIElementCreateApplication(pid)
+    // Bound the round trip. The browser is busy handling the keystroke we just intercepted, and
+    // a slow reply must not hold up the switcher; the caller falls back to WindowServer data.
+    AXUIElementSetMessagingTimeout(appElement, 0.2)
+
+    var windowRef: CFTypeRef?
+    guard AXUIElementCopyAttributeValue(appElement, kAXFocusedWindowAttribute as CFString, &windowRef) == .success,
+          let focusedWindow = windowRef else {
+        debugLog("No Accessibility focused window for pid \(pid)")
+        return nil
+    }
+
+    var positionRef: CFTypeRef?
+    var sizeRef: CFTypeRef?
+    let window = focusedWindow as! AXUIElement
+    guard AXUIElementCopyAttributeValue(window, kAXPositionAttribute as CFString, &positionRef) == .success,
+          AXUIElementCopyAttributeValue(window, kAXSizeAttribute as CFString, &sizeRef) == .success,
+          let positionValue = positionRef,
+          let sizeValue = sizeRef else {
+        debugLog("Could not read the focused window's position or size")
+        return nil
+    }
+
+    var position = CGPoint.zero
+    var size = CGSize.zero
+    guard AXValueGetValue(positionValue as! AXValue, .cgPoint, &position),
+          AXValueGetValue(sizeValue as! AXValue, .cgSize, &size),
+          size.width > 100, size.height > 100 else {
+        debugLog("Focused window has no usable geometry")
+        return nil
+    }
+
+    return flipToAppKit(topLeftOrigin: position, size: size, desktopTop: desktopTop)
+}
+
+/// The frontmost browser window in WindowServer's z-order. Used only when Accessibility
+/// declines or times out, since it cannot tell which window has focus.
+func frontmostBrowserWindowFrame(pid: pid_t, desktopTop: CGFloat) -> NSRect? {
+    guard let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else {
+        debugLog("Could not read the window list")
+        return nil
+    }
+
+    // The list is front to back, so the first match is the frontmost window of that process.
+    for window in windows {
+        guard window[kCGWindowOwnerPID as String] as? pid_t == pid,
+              window[kCGWindowLayer as String] as? Int == 0,
+              let bounds = window[kCGWindowBounds as String] as? [String: Any],
+              let frame = CGRect(dictionaryRepresentation: bounds as CFDictionary),
+              frame.width > 100, frame.height > 100 else { continue }
+        return flipToAppKit(topLeftOrigin: frame.origin, size: frame.size, desktopTop: desktopTop)
+    }
+
+    debugLog("No browser window found in the window list")
+    return nil
+}
+
 func getBrowserWindowFrame() -> NSRect? {
     // First check if a supported browser is the frontmost app
     guard let frontApp = NSWorkspace.shared.frontmostApplication,
@@ -1765,36 +1840,21 @@ func getBrowserWindowFrame() -> NSRect? {
         debugLog("No supported browser is frontmost")
         return nil
     }
-
-    // WindowServer geometry, rather than a synchronous Accessibility request to the browser
-    // while it is still processing the keyboard event we just intercepted.
-    guard let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]],
-          let desktopTop = primaryScreen()?.frame.maxY else {
-        debugLog("Could not read the window list")
+    guard let desktopTop = primaryScreen()?.frame.maxY else {
+        debugLog("No primary screen")
         return nil
     }
 
-    // The list is front to back, so the first match is the frontmost browser window.
-    for window in windows {
-        guard window[kCGWindowOwnerPID as String] as? pid_t == frontApp.processIdentifier,
-              window[kCGWindowLayer as String] as? Int == 0,
-              let bounds = window[kCGWindowBounds as String] as? [String: Any],
-              let frame = CGRect(dictionaryRepresentation: bounds as CFDictionary),
-              frame.width > 100, frame.height > 100 else { continue }
-
-        // Flip from a top-left origin to a bottom-left origin. Both spaces are global and
-        // anchored to the primary display, so the flip is always around that display's top
-        // edge, whichever display the window is on. NSScreen.main must not be used here: with
-        // no key window it follows whichever display the user is active on, which placed the
-        // switcher a full screen height away when the browser sat on a display above the
-        // primary one.
-        let converted = NSRect(x: frame.minX, y: desktopTop - frame.maxY,
-                               width: frame.width, height: frame.height)
-        debugLog("Browser window: cg=\(frame) -> cocoa=\(converted)")
-        return converted
+    if let frame = focusedBrowserWindowFrame(pid: frontApp.processIdentifier, desktopTop: desktopTop) {
+        debugLog("Browser window (focused): \(frame)")
+        return frame
     }
 
-    debugLog("No browser window found in the window list")
+    if let frame = frontmostBrowserWindowFrame(pid: frontApp.processIdentifier, desktopTop: desktopTop) {
+        debugLog("Browser window (frontmost, Accessibility unavailable): \(frame)")
+        return frame
+    }
+
     return nil
 }
 
