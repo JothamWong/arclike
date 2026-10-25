@@ -970,14 +970,11 @@ var handleCopyUrl = async function() {
 	}
 };
 
-// Keep service worker alive (Chrome kills inactive workers after 30s)
-var alivePort = null;
-setInterval(() => {
-	if (!alivePort) {
-		alivePort = chrome.runtime.connect({ name: "keepalive" });
-		alivePort.onDisconnect.addListener(() => { alivePort = null; });
-	}
-	if (alivePort) alivePort.postMessage({ ping: true });
+// Keep the service worker alive (Chrome stops a worker after 30 s idle). Any extension API call
+// resets the idle timer. The worker used to connect a port to itself for this, which nothing
+// listened on, so every attempt logged "Receiving end does not exist".
+setInterval(function() {
+	chrome.runtime.getPlatformInfo(function() {});
 }, 25000);
 
 chrome.storage.session.get(["visitedTabs"], function(result) {

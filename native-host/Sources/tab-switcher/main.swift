@@ -2011,10 +2011,24 @@ final class CommandBarState: NSObject, ObservableObject, NSTextFieldDelegate, NS
 
         panel.setFrame(frame, display: false)
         panel.field.stringValue = text
+        // SwiftUI adds the field to the window during layout. On the panel's first show that
+        // has not happened yet, and focusing a field outside the window fails silently, which
+        // left the first bar after a launch deaf to typing.
+        panel.contentView?.layoutSubtreeIfNeeded()
         panel.makeKeyAndOrderFront(nil)
-        panel.makeFirstResponder(panel.field)
-        panel.field.currentEditor()?.selectAll(nil)
+        focusField()
         sendQuery()
+    }
+
+    private func focusField(retries: Int = 3) {
+        guard let panel = panel, isVisible else { return }
+        if panel.field.window == panel, panel.makeFirstResponder(panel.field) {
+            panel.field.currentEditor()?.selectAll(nil)
+        } else if retries > 0 {
+            DispatchQueue.main.async { self.focusField(retries: retries - 1) }
+        } else {
+            debugLog("Command bar: could not focus the search field")
+        }
     }
 
     /// Rows for query `seq`. A `refresh` carries the same rows again with their favicons.
