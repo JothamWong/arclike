@@ -16,6 +16,9 @@ var initialized = false;
 // MIN_SWITCHER_TABS (when that many exist). The full MRU is still tracked underneath.
 var MIN_SWITCHER_TABS = 4;
 var ACTIVE_WINDOW_MS = 5 * 60 * 1000;
+// Upper bound on the switcher's contents, set from the popup. 0 means no limit.
+var DEFAULT_MAX_SWITCHER_TABS = 5;
+var maxSwitcherTabs = DEFAULT_MAX_SWITCHER_TABS;
 var tabLastSeen = {};        // tabId -> timestamp (ms) the tab was last on screen
 var activeTabByWindow = {};  // windowId -> tabId currently active in that window
 
@@ -749,9 +752,13 @@ var buildSwitcherTabs = function(windows, focusedWindow) {
 	});
 
 	// Keep the tabs seen inside the activity window, padding from the front of the MRU so at
-	// least MIN_SWITCHER_TABS are offered whenever that many exist.
+	// least MIN_SWITCHER_TABS are offered whenever that many exist, and never more than
+	// maxSwitcherTabs.
 	var shown = [];
 	for (var i = 0; i < ordered.length; i++) {
+		if (maxSwitcherTabs > 0 && shown.length >= maxSwitcherTabs) {
+			break;
+		}
 		var seen = tabLastSeen[ordered[i]];
 		var isRecent = seen !== undefined && (now - seen) <= ACTIVE_WINDOW_MS;
 		if (isRecent || shown.length < MIN_SWITCHER_TABS) {
@@ -965,6 +972,18 @@ setInterval(() => {
 }, 25000);
 
 initialize();
+
+chrome.storage.local.get(["maxSwitcherTabs"], function(result) {
+	if (typeof result.maxSwitcherTabs === "number") {
+		maxSwitcherTabs = result.maxSwitcherTabs;
+	}
+});
+chrome.storage.onChanged.addListener(function(changes, area) {
+	if (area === "local" && changes.maxSwitcherTabs) {
+		var value = changes.maxSwitcherTabs.newValue;
+		maxSwitcherTabs = typeof value === "number" ? value : DEFAULT_MAX_SWITCHER_TABS;
+	}
+});
 
 // Connect to native host for Ctrl+Tab interception
 connectNativeHost();

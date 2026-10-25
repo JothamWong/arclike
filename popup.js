@@ -54,6 +54,18 @@ chrome.storage.local.get("shortcuts", function(data) {
   }
 });
 
+// Max tabs shown in the switcher (the service worker defaults to 5 when unset)
+var maxTabsEl = document.getElementById("max-tabs");
+chrome.storage.local.get("maxSwitcherTabs", function(data) {
+  maxTabsEl.value = typeof data.maxSwitcherTabs === "number" ? data.maxSwitcherTabs : 5;
+});
+maxTabsEl.addEventListener("change", function() {
+  var value = parseInt(maxTabsEl.value, 10);
+  if (isNaN(value) || value < 0) value = 0;
+  maxTabsEl.value = value;
+  chrome.storage.local.set({ maxSwitcherTabs: value });
+});
+
 chrome.runtime.sendMessage({ action: "get_version_info" }, function(info) {
   if (chrome.runtime.lastError || !info) return;
 

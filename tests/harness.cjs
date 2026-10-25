@@ -63,7 +63,7 @@ function load(opts = {}) {
       getCurrent: async () => state.windows.find(w => w.focused) || state.windows[0],
       update: async (id, props) => { windowsFocused.push({ id, props }); return state.windows.find(w => w.id === id); },
     },
-    storage: { local: { get: (k, cb) => cb && cb({}), set: () => {} } },
+    storage: { local: { get: (k, cb) => cb && cb(opts.storage || {}), set: () => {} }, onChanged: makeEvent() },
   };
 
   const sandbox = {

@@ -44,9 +44,23 @@ test('activity window keeps recent tabs and pads to the minimum', async () => {
 test('every fresh tab is shown, not just the minimum', async () => {
   const tabs = [tab(10, { active: true, lastAccessed: fresh(1) })];
   for (let i = 1; i < 7; i++) tabs.push(tab(10 + i, { lastAccessed: fresh(i + 1) }));
-  const h = load({ windows: [win(1, tabs, true)] });
+  const h = load({ windows: [win(1, tabs, true)], storage: { maxSwitcherTabs: 0 } });
   await h.deliver({ action: 'cycle_next', current_window_only: true });
   assert.strictEqual(h.lastSent('show_switcher').tabs.length, 7);
+});
+
+test('the switcher shows at most maxSwitcherTabs, in MRU order', async () => {
+  const tabs = [tab(10, { active: true, lastAccessed: fresh(1) })];
+  for (let i = 1; i < 7; i++) tabs.push(tab(10 + i, { lastAccessed: fresh(i + 1) }));
+  const h = load({ windows: [win(1, tabs, true)] });
+  await h.deliver({ action: 'cycle_next', current_window_only: true });
+  const shown = h.lastSent('show_switcher').tabs.map(t => t.id);
+  assert.deepStrictEqual(shown, [10, 11, 12, 13, 14], 'defaults to 5');
+
+  h.chrome.storage.onChanged.emit({ maxSwitcherTabs: { newValue: 3 } }, 'local');
+  await h.deliver({ action: 'cancel_switch' });
+  await h.deliver({ action: 'cycle_next', current_window_only: true });
+  assert.strictEqual(h.lastSent('show_switcher').tabs.length, 3, 'follows the popup setting');
 });
 
 test('current-window-only scoping excludes other windows', async () => {
