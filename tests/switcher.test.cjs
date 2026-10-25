@@ -4,7 +4,7 @@ const { load, win, tab } = require('./harness.cjs');
 
 const NOW = Date.now();
 const fresh = (n) => NOW - n * 1000;
-const stale = () => NOW - 10 * 60 * 1000;   // outside the 5 minute activity window
+const stale = () => NOW - 10 * 60 * 1000;   // accessed ten minutes ago
 
 function fourFresh() {
   return [win(1, [
@@ -15,30 +15,42 @@ function fourFresh() {
   ], true)];
 }
 
-test('MRU starts in last-accessed order and seeds the activity window', () => {
+test('MRU starts in last-accessed order', () => {
   const h = load({ windows: [win(1, [
     tab(10, { active: true, lastAccessed: fresh(1) }),
     tab(11, { lastAccessed: fresh(0.5) }),
     tab(12, { lastAccessed: stale() }),
   ], true)] });
   assert.deepStrictEqual(h.g('mru'), [11, 10, 12]);
-  const seen = h.g('tabLastSeen');
-  assert.ok(seen[12] < NOW - 60000, 'a long-untouched tab keeps its old timestamp');
 });
 
-test('activity window keeps recent tabs and pads to the minimum', async () => {
-  const h = load({ windows: [win(1, [
-    tab(10, { active: true, lastAccessed: fresh(1) }),
-    tab(11, { lastAccessed: fresh(2) }),
-    tab(20, { lastAccessed: stale() }),
-    tab(21, { lastAccessed: stale() }),
-    tab(22, { lastAccessed: stale() }),
-    tab(23, { lastAccessed: stale() }),
-  ], true)] });
+test('a fresh browser session offers only the tab you landed on', async () => {
+  const h = load({ windows: fourFresh(), visited: [] });
   await h.deliver({ action: 'cycle_next', current_window_only: true });
-  const shown = h.lastSent('show_switcher').tabs.map(t => t.id);
-  assert.strictEqual(shown.length, h.g('MIN_SWITCHER_TABS'), 'pads up to the minimum');
-  assert.deepStrictEqual(shown.slice(0, 2), [10, 11], 'the recent tabs come first');
+  assert.deepStrictEqual(h.lastSent('show_switcher').tabs.map(t => t.id), [10]);
+});
+
+test('visiting tabs adds them, and they do not expire', async () => {
+  const h = load({ windows: fourFresh(), visited: [] });
+  h.chrome.tabs.onActivated.emit({ tabId: 12, windowId: 1 });
+  h.chrome.tabs.onActivated.emit({ tabId: 10, windowId: 1 });
+  await h.deliver({ action: 'cycle_next', current_window_only: true });
+  assert.deepStrictEqual(h.lastSent('show_switcher').tabs.map(t => t.id), [10, 12]);
+  assert.deepStrictEqual(h.session.visitedTabs.sort(), [10, 12], 'kept for the browser session');
+});
+
+test('the visited list survives a service worker restart', async () => {
+  const h = load({ windows: fourFresh(), visited: [12, 13] });
+  await h.deliver({ action: 'cycle_next', current_window_only: true });
+  assert.deepStrictEqual(h.lastSent('show_switcher').tabs.map(t => t.id), [10, 12, 13]);
+});
+
+test('a tab opened in the background joins only once visited', async () => {
+  const h = load({ windows: fourFresh(), visited: [] });
+  h.state.windows[0].tabs.push(tab(14));
+  h.chrome.tabs.onCreated.emit({ id: 14, windowId: 1, openerTabId: 10 });
+  await h.deliver({ action: 'cycle_next', current_window_only: true });
+  assert.deepStrictEqual(h.lastSent('show_switcher').tabs.map(t => t.id), [10]);
 });
 
 test('every fresh tab is shown, not just the minimum', async () => {
@@ -354,12 +366,12 @@ test('a preview captured for a tab that then navigates is discarded', async () =
   assert.strictEqual(h.g('tabThumbnails')[10], undefined, 'the stale image is not cached');
 });
 
-test('closing a tab forgets its preview and its timestamp', () => {
+test('closing a tab forgets its preview and its visit', () => {
   const h = load({ windows: fourFresh() });
   h.set('tabThumbnails', { 11: 'data:image/jpeg;base64,ZZZ' });
   h.set('tabThumbnailOrder', [11]);
   h.chrome.tabs.onRemoved.emit(11, {});
   assert.strictEqual(h.g('tabThumbnails')[11], undefined);
-  assert.strictEqual(h.g('tabLastSeen')[11], undefined);
+  assert.strictEqual(h.g('visitedTabs')[11], undefined);
   assert.ok(!h.g('mru').includes(11));
 });

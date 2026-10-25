@@ -17,6 +17,7 @@ function load(opts = {}) {
   const activated = [];          // chrome.tabs.update calls
   const windowsFocused = [];
   let state = { windows: opts.windows || [] };
+  const session = {};            // what the worker saved to chrome.storage.session
 
   const tabsById = () => {
     const m = new Map();
@@ -63,7 +64,16 @@ function load(opts = {}) {
       getCurrent: async () => state.windows.find(w => w.focused) || state.windows[0],
       update: async (id, props) => { windowsFocused.push({ id, props }); return state.windows.find(w => w.id === id); },
     },
-    storage: { local: { get: (k, cb) => cb && cb(opts.storage || {}), set: () => {} }, onChanged: makeEvent() },
+    storage: {
+      local: { get: (k, cb) => cb && cb(opts.storage || {}), set: () => {} },
+      // Every tab counts as visited this session unless a test says otherwise.
+      session: {
+        get: (k, cb) => cb && cb({ visitedTabs: opts.visited ||
+          (opts.windows || []).flatMap(w => w.tabs.map(t => t.id)) }),
+        set: (items) => { Object.assign(session, items); },
+      },
+      onChanged: makeEvent(),
+    },
   };
 
   const sandbox = {
@@ -85,7 +95,7 @@ function load(opts = {}) {
   vm.runInContext(fs.readFileSync(SRC, 'utf8'), ctx, { filename: 'mainsw.js' });
 
   const h = {
-    ctx, sandbox, chrome, sent, activated, windowsFocused, state,
+    ctx, sandbox, chrome, sent, activated, windowsFocused, state, session,
     // Values cross a realm boundary, so objects arrive with the VM's own prototypes. Copy
     // them into this realm before any deepStrictEqual comparison.
     g: (name) => {

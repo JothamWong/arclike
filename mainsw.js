@@ -11,15 +11,14 @@ var VERSION_CHECK_URL = "https://tabswitcher.app/version.json";
 var mru = [];
 var initialized = false;
 
-// Ctrl+Tab switcher contents (Dia-style): every tab that was on screen within the last
-// ACTIVE_WINDOW_MS, plus enough of the most recently used tabs to always show at least
-// MIN_SWITCHER_TABS (when that many exist). The full MRU is still tracked underneath.
-var MIN_SWITCHER_TABS = 4;
-var ACTIVE_WINDOW_MS = 5 * 60 * 1000;
+// Ctrl+Tab switcher contents (Arc/Zen-style): only the tabs visited during this browser
+// session, most recent first. After a restart that is just the tab you land on, and the list
+// grows as you visit more. The full MRU is still tracked underneath.
 // Upper bound on the switcher's contents, set from the popup. 0 means no limit.
 var DEFAULT_MAX_SWITCHER_TABS = 5;
 var maxSwitcherTabs = DEFAULT_MAX_SWITCHER_TABS;
-var tabLastSeen = {};        // tabId -> timestamp (ms) the tab was last on screen
+var visitedTabs = {};        // tabId -> true once the tab has been on screen this session
+var visitedTabsLoaded = false;
 var activeTabByWindow = {};  // windowId -> tabId currently active in that window
 
 // Switch state
@@ -287,23 +286,28 @@ var endSwitch = function() {
 	printMRUSimple();
 }
 
-// Record that a tab is on screen now. The tab it replaced in that window was on screen
-// until this moment, so it gets stamped too.
-var markTabSeen = function(tabId, windowId) {
-	var now = Date.now();
-	var previous = activeTabByWindow[windowId];
-	if (previous !== undefined && previous !== tabId) {
-		tabLastSeen[previous] = now;
+// chrome.storage.session lasts as long as the browser session, so the visited list survives
+// the service worker restarting but starts over when the browser does.
+var saveVisitedTabs = function() {
+	if (visitedTabsLoaded) {
+		chrome.storage.session.set({ visitedTabs: Object.keys(visitedTabs).map(Number) });
 	}
+};
+
+// Record that a tab is on screen now, which puts it in the switcher for the rest of the session.
+var markTabVisited = function(tabId, windowId) {
 	activeTabByWindow[windowId] = tabId;
-	tabLastSeen[tabId] = now;
+	if (!visitedTabs[tabId]) {
+		visitedTabs[tabId] = true;
+		saveVisitedTabs();
+	}
 };
 
 chrome.tabs.onActivated.addListener(function(activeInfo){
 	// Note: By the time this fires, the new tab is already visible
 	// So we capture the NEW tab's thumbnail (the one we just switched to)
 	// This ensures each tab's thumbnail is captured while it's visible
-	markTabSeen(activeInfo.tabId, activeInfo.windowId);
+	markTabVisited(activeInfo.tabId, activeInfo.windowId);
 
 	if(!slowSwitchOngoing && !fastSwitchOngoing && !nativeSwitchOngoing) {
 		var index = mru.indexOf(activeInfo.tabId);
@@ -338,7 +342,10 @@ chrome.tabs.onCreated.addListener(function(tab) {
 chrome.tabs.onRemoved.addListener(function(tabId, removedInfo) {
 	log("Tab remove event fired from tab("+tabId+")");
 	removeTabFromMRU(tabId);
-	delete tabLastSeen[tabId];
+	if (visitedTabs[tabId]) {
+		delete visitedTabs[tabId];
+		saveVisitedTabs();
+	}
 	for (var winId in activeTabByWindow) {
 		if (activeTabByWindow[winId] === tabId) {
 			delete activeTabByWindow[winId];
@@ -356,8 +363,8 @@ chrome.tabs.onRemoved.addListener(function(tabId, removedInfo) {
 // Insert a newly created tab directly behind the tab it was opened from, so with MRU
 // [1, 2, 3] a Cmd+click on tab 1 that opens tab 4 gives [1, 4, 2, 3]. The opener is
 // preferred; failing that, the active tab of the new tab's window, then the MRU head. If
-// the tab is opened in the foreground, onActivated then moves it to the front as usual.
-// The new tab also counts as seen now, so the switcher's activity window shows it.
+// the tab is opened in the foreground, onActivated then moves it to the front as usual. A tab
+// opened in the background joins the switcher only once it is visited.
 var addTabToMRUAfterCurrent = function(tab) {
 	if (mru.indexOf(tab.id) !== -1) {
 		return;
@@ -375,7 +382,6 @@ var addTabToMRUAfterCurrent = function(tab) {
 		}
 	}
 	mru.splice(insertAt, 0, tab.id);
-	tabLastSeen[tab.id] = Date.now();
 	log("Tab(" + tab.id + ") inserted into MRU at " + insertAt + ": " + mru);
 }
 	
@@ -430,16 +436,13 @@ var initialize = function() {
 			windows.forEach(function(window){
 				window.tabs.forEach(function(tab){
 					tabs.push(tab);
-					// Chrome records when each tab was last looked at, so the MRU and the
-					// activity window start out correct instead of guessing after a restart.
-					if (tab.lastAccessed) {
-						tabLastSeen[tab.id] = tab.lastAccessed;
-					}
 					if (tab.active) {
-						markTabSeen(tab.id, window.id);
+						markTabVisited(tab.id, window.id);
 					}
 				});
 			});
+			// Chrome records when each tab was last looked at, so the MRU starts out correct
+			// instead of guessing after a restart.
 			mru = tabs
 				.sort(function(a, b){ return (b.lastAccessed || 0) - (a.lastAccessed || 0); })
 				.map(function(tab){ return tab.id; });
@@ -722,15 +725,14 @@ var resetNativeSwitch = function() {
 };
 
 // Build the switcher's contents from one populated windows query: MRU order, trimmed to the
-// activity window, with the cards assembled from the same tab objects. This replaces a
+// visited tabs, with the cards assembled from the same tab objects. This replaces a
 // per-tab window lookup plus a per-tab metadata lookup, so a switch costs one query in total.
 var buildSwitcherTabs = function(windows, focusedWindow) {
-	var now = Date.now();
-	// Whatever is on screen in any window of this profile counts as seen right now.
+	// Whatever is on screen in any window of this profile counts as visited.
 	windows.forEach(function(win) {
 		win.tabs.forEach(function(tab) {
 			if (tab.active) {
-				tabLastSeen[tab.id] = now;
+				markTabVisited(tab.id, win.id);
 			}
 		});
 	});
@@ -751,21 +753,17 @@ var buildSwitcherTabs = function(windows, focusedWindow) {
 		}
 	});
 
-	// Keep the tabs seen inside the activity window, padding from the front of the MRU so at
-	// least MIN_SWITCHER_TABS are offered whenever that many exist, and never more than
-	// maxSwitcherTabs.
+	// Keep the visited tabs, never more than maxSwitcherTabs.
 	var shown = [];
 	for (var i = 0; i < ordered.length; i++) {
 		if (maxSwitcherTabs > 0 && shown.length >= maxSwitcherTabs) {
 			break;
 		}
-		var seen = tabLastSeen[ordered[i]];
-		var isRecent = seen !== undefined && (now - seen) <= ACTIVE_WINDOW_MS;
-		if (isRecent || shown.length < MIN_SWITCHER_TABS) {
+		if (visitedTabs[ordered[i]]) {
 			shown.push(ordered[i]);
 		}
 	}
-	log("TabSwitch::Activity window: showing " + shown.length + " of " + ordered.length + " tabs");
+	log("TabSwitch::Showing " + shown.length + " visited of " + ordered.length + " tabs");
 
 	return shown.map(function(id) {
 		var tab = tabsById.get(id);
@@ -970,6 +968,14 @@ setInterval(() => {
 	}
 	if (alivePort) alivePort.postMessage({ ping: true });
 }, 25000);
+
+chrome.storage.session.get(["visitedTabs"], function(result) {
+	(result.visitedTabs || []).forEach(function(id) {
+		visitedTabs[id] = true;
+	});
+	visitedTabsLoaded = true;
+	saveVisitedTabs();
+});
 
 initialize();
 
