@@ -5,6 +5,7 @@
  */
 
 importScripts("commandbar.js");
+importScripts("littlearc.js");
 importScripts("arcimport.js");
 
 // Version checking

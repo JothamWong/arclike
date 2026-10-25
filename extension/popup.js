@@ -66,6 +66,15 @@ maxTabsEl.addEventListener("change", function() {
   chrome.storage.local.set({ maxSwitcherTabs: value });
 });
 
+// Links from other apps open in a Little Arc (read by littlearc.js in the service worker)
+var littleArcLinksEl = document.getElementById("little-arc-links");
+chrome.storage.local.get("littleArcForLinks", function(data) {
+  littleArcLinksEl.checked = Boolean(data.littleArcForLinks);
+});
+littleArcLinksEl.addEventListener("change", function() {
+  chrome.storage.local.set({ littleArcForLinks: littleArcLinksEl.checked });
+});
+
 chrome.runtime.sendMessage({ action: "get_version_info" }, function(info) {
   if (chrome.runtime.lastError || !info) return;
 

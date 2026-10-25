@@ -259,14 +259,17 @@ var COMMAND_BAR_COMMANDS = [
 	{ command: "mute-tab", title: "Mute Tab", unTitle: "Unmute Tab", state: "muted", symbol: "speaker.slash", tab: true },
 	{ command: "reload-tab", title: "Reload Tab", hint: "⌘R", symbol: "arrow.clockwise", tab: true },
 	{ command: "move-tab-to-new-window", title: "Move Tab to New Window", symbol: "macwindow.badge.plus", tab: true },
+	{ command: "open-in-little-arc", title: "Open in Little Arc", symbol: "macwindow.on.rectangle", tab: true, when: "mainWindow" },
+	{ command: "move-to-main-window", title: "Move to Main Window", symbol: "macwindow", tab: true, when: "littleArc" },
+	{ command: "new-little-arc", title: "New Little Arc", symbol: "plus.rectangle.on.rectangle" },
 	{ command: "copy-url", title: "Copy URL", hint: "⇧⌘C", symbol: "link", tab: true },
 	{ command: "site-settings", title: "Site Settings", symbol: "slider.horizontal.3", tab: true },
 	{ command: "split-view", title: "Split View with…", symbol: "rectangle.split.2x1", tab: true, when: "canSplit",
 		pick: "split", placeholder: "Split View with a tab, an address or a search" },
 	{ command: "exit-split-view", title: "Exit Split View", symbol: "rectangle", tab: true, when: "split" },
-	{ command: "new-tab-group", title: "New Tab Group…", symbol: "folder.badge.plus", tab: true,
+	{ command: "new-tab-group", title: "New Tab Group…", symbol: "folder.badge.plus", tab: true, when: "mainWindow",
 		pick: "new-group", placeholder: "Name the new group" },
-	{ command: "add-tab-to-group", title: "Add Tab to Group…", symbol: "folder", tab: true,
+	{ command: "add-tab-to-group", title: "Add Tab to Group…", symbol: "folder", tab: true, when: "mainWindow",
 		pick: "group", placeholder: "Add Tab to a group" },
 	{ command: "ungroup-tab", title: "Ungroup Tab", symbol: "folder.badge.minus", tab: true, when: "grouped" },
 	{ command: "reopen-closed-tab", title: "Reopen Closed Tab", hint: "⇧⌘T", symbol: "arrow.uturn.backward" },
@@ -285,7 +288,9 @@ var COMMAND_BAR_COMMANDS = [
 // Conditions a command can name in `when`, checked against the bar's target. Split View needs
 // Chrome 155 or later.
 var COMMAND_BAR_WHEN = {
-	canSplit: function() { return typeof chrome.tabs.createSplit === "function"; },
+	canSplit: function(target) { return typeof chrome.tabs.createSplit === "function" && !target.littleArc; },
+	mainWindow: function(target) { return !target.littleArc; },
+	littleArc: function(target) { return Boolean(target.littleArc); },
 	split: function(target) {
 		return typeof chrome.tabs.unsplit === "function" && target.splitViewId !== undefined && target.splitViewId !== -1;
 	},
@@ -678,20 +683,31 @@ var commandBarAddFavicons = async function(results) {
 // Cmd+T or Cmd+L was pressed. Only the profile that owns the focused window answers, so with
 // several profiles open the bar opens once, over the right window.
 var commandBarOpen = async function(mode) {
-	var win = await chrome.windows.getLastFocused({ windowTypes: ["normal"] });
+	var win = await chrome.windows.getLastFocused({ windowTypes: ["normal", "popup"] });
 	await commandBarTipsLoaded;
 	if (!win || !win.focused) {
 		log("CommandBar::No focused window in this profile - ignoring");
 		return;
 	}
 	var tabs = await chrome.tabs.query({ active: true, windowId: win.id });
-	var active = tabs[0];
+	commandBarShowFor(mode, win, tabs[0]);
+};
+
+// Show the bar over window `win`, whose active tab is `active`. A popup window, such as a Little
+// Arc, holds one page, so there the bar always opens the choice in place.
+var commandBarShowFor = function(mode, win, active) {
+	if (win.type === "popup") {
+		mode = "current_tab";
+	}
 	commandBarTarget = { mode: mode, windowId: win.id, tabId: active ? active.id : null,
 		pinned: Boolean(active && active.pinned), muted: Boolean(active && active.mutedInfo && active.mutedInfo.muted),
 		groupId: active && active.groupId !== undefined ? active.groupId : -1,
 		splitViewId: active && active.splitViewId !== undefined ? active.splitViewId : -1 };
+	if (win.type === "popup") {
+		commandBarTarget.littleArc = true;
+	}
 	var text = "";
-	if (mode === "current_tab" && active && !/^chrome:\/\/newtab\/?$/.test(active.url || "")) {
+	if (mode === "current_tab" && active && !/^(chrome:\/\/newtab\/?|about:blank)$/.test(active.url || "")) {
 		text = active.url || "";
 	}
 	commandBarTip = text ? null : commandBarNextTip(commandBarTarget);
@@ -749,6 +765,7 @@ var commandBarChoose = async function(message) {
 	var item = message.item || (text ? commandBarDefaultRow(text) : null);
 	commandBarRetireUsedTip(item);
 	var newTab = target.mode === "new_tab";
+	littleArcCommandBarOpening();
 	try {
 		if (target.pick) {
 			await commandBarChoosePick(target, item, text);
@@ -814,6 +831,15 @@ var commandBarRunCommand = async function(command, target) {
 		var origin = /^https?:\/\/[^\/?#]+/i.exec(site.url || "");
 		await chrome.tabs.create({ windowId: target.windowId, openerTabId: tabId, url: origin ?
 			"chrome://settings/content/siteDetails?site=" + encodeURIComponent(origin[0]) : "chrome://settings/content" });
+		break;
+	case "open-in-little-arc":
+		await littleArcOpen(tabId, target.windowId);
+		break;
+	case "move-to-main-window":
+		await littleArcMoveToMain(tabId);
+		break;
+	case "new-little-arc":
+		await littleArcNew(target.windowId);
 		break;
 	case "exit-split-view":
 		await chrome.tabs.unsplit(target.splitViewId);

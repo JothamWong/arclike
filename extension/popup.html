@@ -181,6 +181,15 @@
       color: #52525b;
     }
 
+    .setting-toggle {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 12px;
+      color: #e4e4e7;
+      cursor: pointer;
+    }
+
     .version-label {
       text-align: center;
       margin-top: 12px;
@@ -336,6 +345,15 @@
     <div class="shortcut-label">Max Tabs in Switcher</div>
     <input type="number" class="setting-input" id="max-tabs" min="0" max="50" step="1">
     <div class="setting-hint">0 = no limit</div>
+  </div>
+
+  <div class="shortcut" style="margin-top: 8px">
+    <div class="shortcut-label">Little Arc</div>
+    <label class="setting-toggle">
+      <input type="checkbox" id="little-arc-links">
+      Open links from other apps in Little Arc
+    </label>
+    <div class="setting-hint">Arclike guesses from timing, so now and then a tab you opened may move too.</div>
   </div>
 
   <div class="shortcut" style="margin-top: 8px" id="arc-import">
