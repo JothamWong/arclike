@@ -18,3 +18,6 @@ dist/
 # .NET
 native-host-windows/**/bin/
 native-host-windows/**/obj/
+
+# Windows test results copied back by remote-test.sh
+native-host-windows/test/results/
