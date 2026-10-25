@@ -512,18 +512,19 @@ test('New Tab Group… names the group after the typed text', async () => {
   assert.deepStrictEqual(plain(h.ran), [['tabs.group', { tabIds: 10 }]]);
 });
 
-test('a tab closed a moment ago outranks open tabs of the same site, and one closed hours ago does not', async () => {
+test('a tab closed in the last 10 minutes comes before open tabs of the same site, and one closed earlier does not', async () => {
   const now = Date.now() / 1000;
   const open = [10, 11, 12, 13, 14, 15, 16, 17].map(id =>
     tab(id, { active: id === 10, url: 'https://github.com/someone/repo' + id, title: 'GitHub - someone/repo' + id }));
-  const closed = (age) => [{ lastModified: now - age, tab: { sessionId: 's1', url: 'https://github.com/me/arclike', title: 'GitHub - me/arclike' } }];
+  const closed = (age) => [{ lastModified: now - age,
+    tab: { sessionId: 's1', url: 'https://github.com/me/arclike/releases', title: 'Releases · me/arclike' } }];
   let h = load({ windows: [win(1, open, true)], closed: closed(30) });
   await h.call(`commandBarOpen("new_tab")`);
   let results = await query(h, 'github');
-  assert.deepStrictEqual([results[0].kind, results[0].url], ['closed', 'https://github.com/me/arclike']);
+  assert.deepStrictEqual([results[0].kind, results[0].url], ['closed', 'https://github.com/me/arclike/releases']);
   assert.strictEqual(h.lastSent('command_bar_results').autocomplete, 'github.com/');
 
-  h = load({ windows: [win(1, open, true)], closed: closed(3 * 3600) });
+  h = load({ windows: [win(1, open, true)], closed: closed(30 * 60) });
   await h.call(`commandBarOpen("new_tab")`);
   results = await query(h, 'github');
   assert.strictEqual(results[0].kind, 'tab');

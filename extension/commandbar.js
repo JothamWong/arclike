@@ -28,6 +28,7 @@ var commandBarHistoryLoading = null;
 var commandBarHistoryWaited = false;
 // The newest query the app sent. An older one still in flight is dropped rather than answered.
 var commandBarLatestSeq = 0;
+var commandBarClosedCount = 0;   // recently closed tabs seen by the last search, for the trace
 
 var COMMAND_BAR_SCHEMES = /^(https?|file|ftp|chrome|chrome-extension|about|view-source):/i;
 
@@ -190,14 +191,14 @@ var commandBarFuzzyScore = function(query, item, title, url) {
 // opened thousands of times does not bury everything else. The most a page can get stays below
 // an open tab's bonus, so an open tab wins a tie.
 var COMMAND_BAR_TAB_BONUS = 45;
+var COMMAND_BAR_CLOSED_BONUS = 35;
+// A tab closed this recently is what you are most likely after, so it comes before every other
+// page that matches, whatever their titles score.
+var COMMAND_BAR_FRESH_CLOSED_MINUTES = 10;
 
-// A tab closed a moment ago is what you are most likely after, so it starts above an open tab and
-// drops below one within the hour, halving its lead every 15 minutes.
-var COMMAND_BAR_CLOSED_HALF_LIFE_MINUTES = 15;
-
-var commandBarClosedBonus = function(tab) {
-	var ageMinutes = Math.max(0, (Date.now() / 1000 - (tab.lastModified || 0)) / 60);
-	return 30 + 25 * Math.pow(0.5, ageMinutes / COMMAND_BAR_CLOSED_HALF_LIFE_MINUTES);
+var commandBarFreshlyClosed = function(candidate) {
+	return candidate.kind === "closed" &&
+		Date.now() / 1000 - (candidate.lastModified || 0) < COMMAND_BAR_FRESH_CLOSED_MINUTES * 60;
 };
 var COMMAND_BAR_BOOKMARK_BONUS = 25;
 var COMMAND_BAR_RECENCY_HALF_LIFE_HOURS = 24;
@@ -373,7 +374,8 @@ var commandBarRank = function(query, sources) {
 			add("tab", tab, tab.title, tab.url, COMMAND_BAR_TAB_BONUS, { tabId: tab.id });
 		});
 		(sources.closed || []).forEach(function(tab) {
-			add("closed", tab, tab.title, tab.url, commandBarClosedBonus(tab), { sessionId: tab.sessionId });
+			add("closed", tab, tab.title, tab.url, COMMAND_BAR_CLOSED_BONUS,
+				{ sessionId: tab.sessionId, lastModified: tab.lastModified });
 		});
 		(sources.bookmarks || []).forEach(function(bookmark) {
 			add("bookmark", bookmark, bookmark.title, bookmark.url, COMMAND_BAR_BOOKMARK_BONUS);
@@ -387,7 +389,9 @@ var commandBarRank = function(query, sources) {
 		fuzzy = true;
 		addAll();
 	}
-	candidates.sort(function(a, b) { return b.score - a.score; });
+	candidates.sort(function(a, b) {
+		return commandBarFreshlyClosed(b) - commandBarFreshlyClosed(a) || b.score - a.score;
+	});
 	var commands = commandBarMatchingCommands(text, sources.target);
 
 	var results = [];
@@ -403,7 +407,7 @@ var commandBarRank = function(query, sources) {
 	} else {
 		var best = candidates[0];
 		var strong = best && text.length >= 2 && (best.match >= COMMAND_BAR_STRONG_HOST_MATCH ||
-			(best.kind === "tab" && best.match >= COMMAND_BAR_STRONG_TAB_MATCH));
+			((best.kind === "tab" || commandBarFreshlyClosed(best)) && best.match >= COMMAND_BAR_STRONG_TAB_MATCH));
 		// A command whose name starts with the query leads when no page does: "set" is Settings.
 		if (!strong && commands.length && commands[0].match >= COMMAND_BAR_STRONG_TAB_MATCH && text.length >= 3) {
 			results.push(commands.shift());
@@ -555,6 +559,7 @@ var commandBarSearch = async function(query) {
 			chrome.bookmarks.search(query).catch(function() { return []; }),
 			commandBarClosedTabs()
 		]);
+		commandBarClosedCount = found[2].length;
 		// The tab the bar opened over is where you already are.
 		var hereTabId = commandBarTarget ? commandBarTarget.tabId : null;
 		results = commandBarRank(query, {
@@ -645,8 +650,9 @@ var commandBarQuery = async function(message) {
 	var autocomplete = query.trim() && !picking ? commandBarAutocomplete(query, results[0]) : "";
 	sendToNativeHost({ action: "command_bar_results", seq: message.seq, results: results,
 		autocomplete: autocomplete });
-	commandBarTrace("answered \"" + query + "\" with " + results.length + " rows in " +
-		(Date.now() - startedAt) + " ms");
+	commandBarTrace("answered \"" + query + "\" with " + results.length + " rows (" +
+		results.map(function(result) { return result.kind; }).join(" ") + "), " +
+		commandBarClosedCount + " closed tabs, in " + (Date.now() - startedAt) + " ms");
 	if (await commandBarAddFavicons(results) && message.seq === commandBarLatestSeq) {
 		sendToNativeHost({ action: "command_bar_results", seq: message.seq, results: results,
 			autocomplete: autocomplete, refresh: true });
