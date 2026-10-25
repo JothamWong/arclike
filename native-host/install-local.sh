@@ -25,8 +25,11 @@ HOST_MANIFEST="$HOME/Library/Application Support/Google/Chrome/NativeMessagingHo
 DEFAULT_IDENTITY="Arclike Local Signing"
 
 if [ -z "${SIGNING_IDENTITY:-}" ]; then
-    if security find-identity -v -p codesigning | grep -q "\"$DEFAULT_IDENTITY\""; then
-        SIGNING_IDENTITY="$DEFAULT_IDENTITY"
+    # Signed by fingerprint: an earlier, untrusted certificate of the same name makes the name
+    # ambiguous to codesign, and only the trusted one is listed here.
+    DEFAULT_HASH=$(security find-identity -v -p codesigning | grep -F "\"$DEFAULT_IDENTITY\"" | awk 'NR == 1 { print $2 }')
+    if [ -n "$DEFAULT_HASH" ]; then
+        SIGNING_IDENTITY="$DEFAULT_HASH"
     else
         SIGNING_IDENTITY="-"
         echo "Note: signing ad hoc. Run ./create-signing-identity.sh once to keep the"
