@@ -7,7 +7,7 @@ import Sparkle
 import UserNotifications
 import ImageIO
 
-let APP_VERSION = "3.7.5"
+let APP_VERSION = "0.1.0"
 
 // MARK: - Branding
 
