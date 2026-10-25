@@ -57,6 +57,8 @@ function load(opts = {}) {
       update: async (id, props) => { activated.push({ id, props }); return tabsById().get(id); },
       create: async (props) => { created.push(props); return Object.assign({ id: 999 }, props); },
       remove: record('tabs.remove'), duplicate: record('tabs.duplicate'), reload: record('tabs.reload'),
+      move: record('tabs.move'), ungroup: record('tabs.ungroup'), unsplit: record('tabs.unsplit'),
+      group: record('tabs.group', 77), createSplit: record('tabs.createSplit', 5),
       captureVisibleTab: async () => 'data:image/jpeg;base64,AAAA',
     },
     windows: {
@@ -78,7 +80,13 @@ function load(opts = {}) {
     bookmarks: { search: async () => opts.bookmarks || [] },
     topSites: { get: async () => opts.topSites || [] },
     search: { query: async (q) => { searched.push(q); } },
-    sessions: { restore: record('sessions.restore') },
+    tabGroups: {
+      query: async () => opts.groups || [],
+      get: async (id) => (opts.groups || []).find(g => g.id === id),
+      update: record('tabGroups.update'),
+    },
+    sessions: { restore: record('sessions.restore'), MAX_SESSION_RESULTS: 25,
+      getRecentlyClosed: async () => opts.closed || [] },
     storage: {
       local: { get: (k, cb) => cb && cb(opts.storage || {}), set: () => {} },
       // Every tab counts as visited this session unless a test says otherwise.

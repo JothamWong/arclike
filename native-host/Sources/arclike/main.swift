@@ -2000,8 +2000,9 @@ final class CommandBarState: NSObject, ObservableObject, NSTextFieldDelegate, NS
     private var mouseLocationAtShow: NSPoint = .zero
 
     /// Show the bar over the focused browser window, holding `text` (selected, so typing
-    /// replaces it). Called again while open, it starts over with the new text.
-    func show(text: String) {
+    /// replaces it). Called again while open, it starts over with the new text. `placeholder`
+    /// replaces the usual prompt, for a second choice such as the tab to split with.
+    func show(text: String, placeholder: String? = nil) {
         if panel == nil {
             let newPanel = CommandBarPanel()
             newPanel.delegate = self
@@ -2030,6 +2031,7 @@ final class CommandBarState: NSObject, ObservableObject, NSTextFieldDelegate, NS
         isVisible = true
 
         panel.setFrame(frame, display: false)
+        panel.setPlaceholder(placeholder ?? CommandBarPanel.defaultPlaceholder)
         panel.field.stringValue = text
         // SwiftUI adds the field to the window during layout. On the panel's first show that
         // has not happened yet, and focusing a field outside the window fails silently, which
@@ -2082,6 +2084,15 @@ final class CommandBarState: NSObject, ObservableObject, NSTextFieldDelegate, NS
         var message: [String: Any] = ["action": "command_bar_choose", "text": panel?.field.stringValue ?? typed]
         if let index = index, items.indices.contains(index) {
             message["item"] = items[index].payload
+            // A command that asks for a second choice keeps the bar open. The extension shows
+            // it again with the new prompt.
+            if items[index].payload["pick"] != nil {
+                items = []
+                selectedIndex = nil
+                resizePanel()
+                sendMessage(message)
+                return
+            }
         }
         // Hide first, so the browser window has the keyboard back before the tab opens.
         hidePanel()
@@ -2361,12 +2372,18 @@ final class CommandBarPanel: NSPanel {
         field.usesSingleLineMode = true
         field.cell?.wraps = false
         field.cell?.isScrollable = true
-        field.placeholderAttributedString = NSAttributedString(
-            string: "Search with Google or enter address",
-            attributes: [.foregroundColor: NSColor.white.withAlphaComponent(0.4), .font: font]
-        )
+        setPlaceholder(CommandBarPanel.defaultPlaceholder)
 
         contentView = NSHostingView(rootView: CommandBarView(field: field))
+    }
+
+    static let defaultPlaceholder = "Search with Google or enter address"
+
+    func setPlaceholder(_ text: String) {
+        field.placeholderAttributedString = NSAttributedString(
+            string: text,
+            attributes: [.foregroundColor: NSColor.white.withAlphaComponent(0.4), .font: field.font ?? NSFont.systemFont(ofSize: 18)]
+        )
     }
 
     override var canBecomeKey: Bool { true }
@@ -2738,8 +2755,9 @@ func handleMessage(_ message: [String: Any]) {
 
     case "show_command_bar":
         let text = message["text"] as? String ?? ""
+        let placeholder = message["placeholder"] as? String
         DispatchQueue.main.async {
-            CommandBarState.shared.show(text: text)
+            CommandBarState.shared.show(text: text, placeholder: placeholder)
         }
 
     case "command_bar_results":

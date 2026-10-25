@@ -41,7 +41,8 @@ test('Cmd+T opens an empty bar over the focused window', async () => {
   const h = browser();
   await h.call(`commandBarOpen("new_tab")`);
   assert.deepStrictEqual(h.lastSent('show_command_bar'), { action: 'show_command_bar', mode: 'new_tab', text: '' });
-  assert.deepStrictEqual(h.g('commandBarTarget'), { mode: 'new_tab', windowId: 1, tabId: 10, pinned: false, muted: false });
+  assert.deepStrictEqual(h.g('commandBarTarget'),
+    { mode: 'new_tab', windowId: 1, tabId: 10, pinned: false, muted: false, groupId: -1, splitViewId: -1 });
 });
 
 test('Cmd+L opens the bar holding the current address', async () => {
@@ -359,4 +360,154 @@ test('the extension tells the app it can answer the command bar', async () => {
   const h = browser();
   await h.deliver({ action: 'ready' });
   assert.deepStrictEqual(h.lastSent('register').features, ['command_bar']);
+});
+
+test('a recently closed tab is found, above its history, and Enter restores it', async () => {
+  const h = browser({
+    closed: [
+      { lastModified: 1, tab: { sessionId: 's1', url: 'https://zed.dev/docs', title: 'Zed docs' } },
+      { lastModified: 2, window: { sessionId: 'w1', tabs: [] } },
+    ],
+    history: [{ url: 'https://zed.dev/docs', title: 'Zed docs', visitCount: 2, lastVisitTime: Date.now() }],
+  });
+  await h.call(`commandBarOpen("new_tab")`);
+  const results = await query(h, 'zed docs');
+  const closed = results.find(r => r.url === 'https://zed.dev/docs');
+  assert.strictEqual(closed.kind, 'closed');
+  assert.strictEqual(closed.hint, 'Closed');
+  assert.strictEqual(results.filter(r => r.url === 'https://zed.dev/docs').length, 1);
+  await h.call(`commandBarChoose({ item: ${JSON.stringify(closed)}, text: "zed docs" })`);
+  assert.deepStrictEqual(plain(h.ran), [['sessions.restore', 's1']]);
+  assert.deepStrictEqual(plain(h.created), []);
+});
+
+function splitBrowser(opts = {}) {
+  return load(Object.assign({ windows: [win(1, [
+    tab(10, { index: 0, active: true, groupId: -1, splitViewId: -1, title: 'Here' }),
+    tab(11, { index: 1, groupId: -1, splitViewId: -1, url: 'https://docs.rs/', title: 'Docs.rs' }),
+    tab(12, { index: 2, groupId: -1, splitViewId: -1, url: 'https://leetcode.com/', title: 'LeetCode' }),
+  ], true)] }, opts));
+}
+
+test('Split View with… asks for the tab in the bar, which stays open', async () => {
+  const h = splitBrowser();
+  await h.call(`commandBarOpen("new_tab")`);
+  const command = (await query(h, 'split'))[0];
+  assert.deepStrictEqual([command.title, command.pick], ['Split View with…', 'split']);
+  await h.call(`commandBarChoose({ item: ${JSON.stringify(command)}, text: "split" })`);
+  assert.strictEqual(h.lastSent('show_command_bar').placeholder, 'Split View with a tab, an address or a search');
+  assert.strictEqual(h.g('commandBarTarget').pick, 'split');
+  const rows = await query(h, '');
+  assert.deepStrictEqual(rows.map(r => r.kind + ':' + r.title), ['new-tab:New Tab', 'tab:Docs.rs', 'tab:LeetCode']);
+  assert.strictEqual(h.lastSent('command_bar_results').autocomplete, '');
+  assert.deepStrictEqual(kinds(await query(h, 'leet')), ['tab:https://leetcode.com/', 'search:leet']);
+});
+
+test('Split View is not offered before Chrome 155', async () => {
+  const h = splitBrowser();
+  delete h.chrome.tabs.createSplit;
+  await h.call(`commandBarOpen("new_tab")`);
+  assert.ok(!(await query(h, 'split')).some(r => r.kind === 'command'));
+});
+
+test('a neighbouring tab is split with at once', async () => {
+  const h = splitBrowser();
+  await h.call(`commandBarOpen("new_tab")`);
+  h.set('commandBarTarget', Object.assign(h.g('commandBarTarget'), { pick: 'split' }));
+  await h.call(`commandBarChoose({ item: { kind: "tab", tabId: 11 }, text: "" })`);
+  assert.deepStrictEqual(plain(h.ran), [['tabs.createSplit', [10, 11]]]);
+  assert.strictEqual(h.g('commandBarTarget'), null);
+});
+
+test('a tab further away is moved beside this one, then split', async () => {
+  const h = splitBrowser();
+  await h.call(`commandBarOpen("new_tab")`);
+  h.set('commandBarTarget', Object.assign(h.g('commandBarTarget'), { pick: 'split' }));
+  await h.call(`commandBarChoose({ item: { kind: "tab", tabId: 12 }, text: "" })`);
+  assert.deepStrictEqual(plain(h.ran), [['tabs.move', 12, { windowId: 1, index: 1 }], ['tabs.createSplit', [10, 12]]]);
+});
+
+test('a tab in another group joins this tab\'s group, and a split tab leaves its split', async () => {
+  const h = splitBrowser({ windows: [win(1, [
+    tab(10, { index: 0, active: true, groupId: 3, splitViewId: -1 }),
+    tab(11, { index: 1, groupId: -1, splitViewId: 8 }),
+  ], true)] });
+  await h.call(`commandBarOpen("new_tab")`);
+  h.set('commandBarTarget', Object.assign(h.g('commandBarTarget'), { pick: 'split' }));
+  await h.call(`commandBarChoose({ item: { kind: "tab", tabId: 11 }, text: "" })`);
+  assert.deepStrictEqual(plain(h.ran), [
+    ['tabs.unsplit', 8], ['tabs.group', { groupId: 3, tabIds: 11 }], ['tabs.createSplit', [10, 11]],
+  ]);
+});
+
+test('Enter in the split picker opens a new tab, an address or a search beside this one', async () => {
+  let h = splitBrowser();
+  await h.call(`commandBarOpen("new_tab")`);
+  h.set('commandBarTarget', Object.assign(h.g('commandBarTarget'), { pick: 'split' }));
+  await h.call(`commandBarChoose({ text: "" })`);
+  assert.deepStrictEqual(plain(h.created), [{ splitWithTabId: 10 }]);
+
+  h = splitBrowser();
+  await h.call(`commandBarOpen("new_tab")`);
+  h.set('commandBarTarget', Object.assign(h.g('commandBarTarget'), { pick: 'split' }));
+  await h.call(`commandBarChoose({ text: "github.com" })`);
+  assert.deepStrictEqual(plain(h.created), [{ splitWithTabId: 10, url: 'https://github.com' }]);
+
+  h = splitBrowser();
+  await h.call(`commandBarOpen("new_tab")`);
+  h.set('commandBarTarget', Object.assign(h.g('commandBarTarget'), { pick: 'split' }));
+  await h.call(`commandBarChoose({ text: "rust traits" })`);
+  assert.deepStrictEqual(plain(h.searched), [{ text: 'rust traits', tabId: 999 }]);
+});
+
+test('Exit Split View and Ungroup Tab are offered only when they apply', async () => {
+  let h = splitBrowser();
+  await h.call(`commandBarOpen("new_tab")`);
+  assert.ok(!(await query(h, 'exit split')).some(r => r.kind === 'command'));
+  assert.ok(!(await query(h, 'ungroup')).some(r => r.kind === 'command'));
+
+  h = splitBrowser({ windows: [win(1, [tab(10, { index: 0, active: true, groupId: 3, splitViewId: 8 })], true)] });
+  await h.call(`commandBarOpen("new_tab")`);
+  assert.strictEqual((await query(h, 'exit split'))[0].command, 'exit-split-view');
+  assert.strictEqual((await query(h, 'ungroup'))[0].command, 'ungroup-tab');
+  await h.call(`commandBarChoose({ item: { kind: "command", command: "exit-split-view" }, text: "" })`);
+  await h.call(`commandBarOpen("new_tab")`);
+  await h.call(`commandBarChoose({ item: { kind: "command", command: "ungroup-tab" }, text: "" })`);
+  assert.deepStrictEqual(plain(h.ran), [['tabs.unsplit', 8], ['tabs.ungroup', 10]]);
+});
+
+test('Add Tab to Group… lists the groups and adds the tab to the chosen one', async () => {
+  const h = splitBrowser({
+    windows: [win(1, [
+      tab(10, { index: 0, active: true, groupId: -1 }),
+      tab(11, { index: 1, groupId: 4 }), tab(12, { index: 2, groupId: 4 }), tab(13, { index: 3, groupId: 5 }),
+    ], true)],
+    groups: [{ id: 4, title: 'Work', color: 'blue', windowId: 1 }, { id: 5, title: '', color: 'red', windowId: 1 },
+      { id: 6, title: 'Empty', color: 'red', windowId: 1 }],
+  });
+  await h.call(`commandBarOpen("new_tab")`);
+  await h.call(`commandBarChoose({ item: { kind: "command", command: "add-tab-to-group", pick: "group" }, text: "" })`);
+  const rows = await query(h, '');
+  assert.deepStrictEqual(rows.map(r => r.title + ' / ' + r.detail),
+    ['Work / Blue, 2 tabs', 'Unnamed group / Red, 1 tab', 'Unnamed group / New Tab Group']);
+  assert.deepStrictEqual((await query(h, 'wo')).map(r => r.title), ['Work', 'wo']);
+  await h.call(`commandBarChoose({ item: ${JSON.stringify(rows[0])}, text: "" })`);
+  assert.deepStrictEqual(plain(h.ran), [['tabs.group', { groupId: 4, tabIds: 10 }]]);
+});
+
+test('New Tab Group… names the group after the typed text', async () => {
+  let h = splitBrowser();
+  await h.call(`commandBarOpen("new_tab")`);
+  await h.call(`commandBarChoose({ item: { kind: "command", command: "new-tab-group", pick: "new-group" }, text: "" })`);
+  assert.strictEqual(h.lastSent('show_command_bar').placeholder, 'Name the new group');
+  const rows = await query(h, 'Reading');
+  assert.deepStrictEqual(rows.map(r => r.kind + ':' + r.title), ['new-group:Reading']);
+  await h.call(`commandBarChoose({ item: ${JSON.stringify(rows[0])}, text: "Reading" })`);
+  assert.deepStrictEqual(plain(h.ran), [['tabs.group', { tabIds: 10 }], ['tabGroups.update', 77, { title: 'Reading' }]]);
+
+  h = splitBrowser();
+  await h.call(`commandBarOpen("new_tab")`);
+  await h.call(`commandBarChoose({ item: { kind: "command", command: "new-tab-group", pick: "new-group" }, text: "" })`);
+  await h.call(`commandBarChoose({ text: "" })`);
+  assert.deepStrictEqual(plain(h.ran), [['tabs.group', { tabIds: 10 }]]);
 });

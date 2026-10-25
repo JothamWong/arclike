@@ -190,6 +190,7 @@ var commandBarFuzzyScore = function(query, item, title, url) {
 // opened thousands of times does not bury everything else. The most a page can get stays below
 // an open tab's bonus, so an open tab wins a tie.
 var COMMAND_BAR_TAB_BONUS = 45;
+var COMMAND_BAR_CLOSED_BONUS = 35;
 var COMMAND_BAR_BOOKMARK_BONUS = 25;
 var COMMAND_BAR_RECENCY_HALF_LIFE_HOURS = 24;
 
@@ -250,6 +251,14 @@ var COMMAND_BAR_COMMANDS = [
 	{ command: "reload-tab", title: "Reload Tab", hint: "⌘R", symbol: "arrow.clockwise", tab: true },
 	{ command: "move-tab-to-new-window", title: "Move Tab to New Window", symbol: "macwindow.badge.plus", tab: true },
 	{ command: "copy-url", title: "Copy URL", hint: "⇧⌘C", symbol: "link", tab: true },
+	{ command: "split-view", title: "Split View with…", symbol: "rectangle.split.2x1", tab: true, when: "canSplit",
+		pick: "split", placeholder: "Split View with a tab, an address or a search" },
+	{ command: "exit-split-view", title: "Exit Split View", symbol: "rectangle", tab: true, when: "split" },
+	{ command: "new-tab-group", title: "New Tab Group…", symbol: "folder.badge.plus", tab: true,
+		pick: "new-group", placeholder: "Name the new group" },
+	{ command: "add-tab-to-group", title: "Add Tab to Group…", symbol: "folder", tab: true,
+		pick: "group", placeholder: "Add Tab to a group" },
+	{ command: "ungroup-tab", title: "Ungroup Tab", symbol: "folder.badge.minus", tab: true, when: "grouped" },
 	{ command: "reopen-closed-tab", title: "Reopen Closed Tab", hint: "⇧⌘T", symbol: "arrow.uturn.backward" },
 	{ command: "new-window", title: "New Window", hint: "⌘N", symbol: "macwindow" },
 	{ command: "new-incognito-window", title: "New Incognito Window", hint: "⇧⌘N", symbol: "eyeglasses" },
@@ -263,8 +272,19 @@ var COMMAND_BAR_COMMANDS = [
 	{ url: "chrome://settings/clearBrowserData", title: "Clear Browsing Data", hint: "⇧⌘⌫", symbol: "trash" }
 ];
 
+// Conditions a command can name in `when`, checked against the bar's target. Split View needs
+// Chrome 155 or later.
+var COMMAND_BAR_WHEN = {
+	canSplit: function() { return typeof chrome.tabs.createSplit === "function"; },
+	split: function(target) {
+		return typeof chrome.tabs.unsplit === "function" && target.splitViewId !== undefined && target.splitViewId !== -1;
+	},
+	grouped: function(target) { return target.groupId !== undefined && target.groupId !== -1; }
+};
+
 // The commands whose name has a word starting with each word of the query, best first. `target`
-// is the bar's target: without a tab, the tab commands are left out.
+// is the bar's target: without a tab, the tab commands are left out. A command with `pick` asks
+// for a second choice in the bar, such as the tab to split with.
 var commandBarMatchingCommands = function(text, target) {
 	var words = text.toLowerCase().split(/\s+/).filter(Boolean);
 	if (!words.length) {
@@ -273,7 +293,7 @@ var commandBarMatchingCommands = function(text, target) {
 	var hasTab = Boolean(target) && target.tabId !== null && target.tabId !== undefined;
 	var matches = [];
 	COMMAND_BAR_COMMANDS.forEach(function(definition) {
-		if (definition.tab && !hasTab) {
+		if ((definition.tab && !hasTab) || (definition.when && !COMMAND_BAR_WHEN[definition.when](target))) {
 			return;
 		}
 		var title = definition.state && target && target[definition.state] ? definition.unTitle : definition.title;
@@ -290,6 +310,9 @@ var commandBarMatchingCommands = function(text, target) {
 		} else {
 			row.command = definition.command;
 		}
+		if (definition.pick) {
+			row.pick = definition.pick;
+		}
 		matches.push(row);
 	});
 	matches.sort(function(a, b) { return b.match - a.match; });
@@ -299,9 +322,11 @@ var commandBarMatchingCommands = function(text, target) {
 // When the exact pass finds fewer pages than this, a second pass allows typos.
 var COMMAND_BAR_FUZZY_BELOW = 3;
 
-// Rank open tabs, bookmarks and history for the query and put the typed text's own row (open
-// the URL, or search) among them. A page that is in several sources is listed once, as an open
-// tab first, then as a bookmark.
+// Rank open tabs, recently closed tabs, bookmarks and history for the query and put the typed
+// text's own row (open the URL, or search) among them. A page that is in several sources is
+// listed once, as an open tab first, then as a closed tab, then as a bookmark.
+var COMMAND_BAR_HINTS = { tab: "Switch to Tab", closed: "Closed", bookmark: "Bookmark" };
+
 var commandBarRank = function(query, sources) {
 	var text = query.trim();
 	var candidates = [];
@@ -325,7 +350,7 @@ var commandBarRank = function(query, sources) {
 			kind: kind,
 			title: title || commandBarDisplayUrl(url),
 			detail: commandBarDisplayUrl(url),
-			hint: kind === "tab" ? "Switch to Tab" : kind === "bookmark" ? "Bookmark" : "",
+			hint: COMMAND_BAR_HINTS[kind] || "",
 			url: url,
 			key: key,
 			match: match,
@@ -337,6 +362,9 @@ var commandBarRank = function(query, sources) {
 	var addAll = function() {
 		(sources.tabs || []).forEach(function(tab) {
 			add("tab", tab, tab.title, tab.url, COMMAND_BAR_TAB_BONUS, { tabId: tab.id });
+		});
+		(sources.closed || []).forEach(function(tab) {
+			add("closed", tab, tab.title, tab.url, COMMAND_BAR_CLOSED_BONUS, { sessionId: tab.sessionId });
 		});
 		(sources.bookmarks || []).forEach(function(bookmark) {
 			add("bookmark", bookmark, bookmark.title, bookmark.url, COMMAND_BAR_BOOKMARK_BONUS);
@@ -392,7 +420,7 @@ var commandBarRank = function(query, sources) {
 	}
 	return results.slice(0, COMMAND_BAR_MAX_RESULTS).map(function(result) {
 		var row = { kind: result.kind, title: result.title, detail: result.detail, hint: result.hint };
-		["url", "tabId", "text", "command", "symbol"].forEach(function(field) {
+		["url", "tabId", "text", "command", "symbol", "pick", "sessionId"].forEach(function(field) {
 			if (result[field] !== undefined) {
 				row[field] = result[field];
 			}
@@ -471,9 +499,25 @@ chrome.history.onVisitRemoved.addListener(function() {
 	commandBarLoadHistory();
 });
 
+// Recently closed tabs, newest first. Closed windows are left out: Reopen Closed Tab brings
+// those back.
+var commandBarClosedTabs = async function() {
+	try {
+		var sessions = await chrome.sessions.getRecentlyClosed({ maxResults: chrome.sessions.MAX_SESSION_RESULTS || 25 });
+		return sessions.filter(function(session) {
+			return session.tab && session.tab.url && session.tab.sessionId;
+		}).map(function(session) { return session.tab; });
+	} catch (e) {
+		log("CommandBar::Could not read recently closed tabs: " + e.message);
+		return [];
+	}
+};
+
 var commandBarSearch = async function(query) {
 	var results;
-	if (!query.trim()) {
+	if (commandBarTarget && commandBarTarget.pick) {
+		results = await commandBarPickResults(query, commandBarTarget);
+	} else if (!query.trim()) {
 		var sites = await chrome.topSites.get();
 		results = sites.slice(0, COMMAND_BAR_TOP_SITES).map(function(site) {
 			return {
@@ -495,12 +539,14 @@ var commandBarSearch = async function(query) {
 		}
 		var found = await Promise.all([
 			chrome.tabs.query({ windowType: "normal" }),
-			chrome.bookmarks.search(query).catch(function() { return []; })
+			chrome.bookmarks.search(query).catch(function() { return []; }),
+			commandBarClosedTabs()
 		]);
 		// The tab the bar opened over is where you already are.
 		var hereTabId = commandBarTarget ? commandBarTarget.tabId : null;
 		results = commandBarRank(query, {
 			tabs: found[0].filter(function(tab) { return tab.id !== hereTabId; }),
+			closed: found[2],
 			bookmarks: found[1].filter(function(bookmark) { return bookmark.url; }),
 			history: commandBarHistory ? Array.from(commandBarHistory.values()) : [],
 			target: commandBarTarget
@@ -556,7 +602,9 @@ var commandBarOpen = async function(mode) {
 	var tabs = await chrome.tabs.query({ active: true, windowId: win.id });
 	var active = tabs[0];
 	commandBarTarget = { mode: mode, windowId: win.id, tabId: active ? active.id : null,
-		pinned: Boolean(active && active.pinned), muted: Boolean(active && active.mutedInfo && active.mutedInfo.muted) };
+		pinned: Boolean(active && active.pinned), muted: Boolean(active && active.mutedInfo && active.mutedInfo.muted),
+		groupId: active && active.groupId !== undefined ? active.groupId : -1,
+		splitViewId: active && active.splitViewId !== undefined ? active.splitViewId : -1 };
 	var text = "";
 	if (mode === "current_tab" && active && !/^chrome:\/\/newtab\/?$/.test(active.url || "")) {
 		text = active.url || "";
@@ -580,7 +628,8 @@ var commandBarQuery = async function(message) {
 	if (message.seq < commandBarLatestSeq) {
 		return;
 	}
-	var autocomplete = query.trim() ? commandBarAutocomplete(query, results[0]) : "";
+	var picking = Boolean(commandBarTarget && commandBarTarget.pick);
+	var autocomplete = query.trim() && !picking ? commandBarAutocomplete(query, results[0]) : "";
 	sendToNativeHost({ action: "command_bar_results", seq: message.seq, results: results,
 		autocomplete: autocomplete });
 	commandBarTrace("answered \"" + query + "\" with " + results.length + " rows in " +
@@ -609,7 +658,11 @@ var commandBarChoose = async function(message) {
 	var item = message.item || (text ? commandBarDefaultRow(text) : null);
 	var newTab = target.mode === "new_tab";
 	try {
-		if (!item) {
+		if (target.pick) {
+			await commandBarChoosePick(target, item, text);
+		} else if (item && item.kind === "command" && item.pick) {
+			commandBarAskPick(target, item.pick);
+		} else if (!item) {
 			if (newTab) {
 				await chrome.tabs.create({ windowId: target.windowId });
 			}
@@ -619,6 +672,8 @@ var commandBarChoose = async function(message) {
 			var tab = await chrome.tabs.get(item.tabId);
 			await chrome.windows.update(tab.windowId, { focused: true });
 			await chrome.tabs.update(tab.id, { active: true });
+		} else if (item.kind === "closed") {
+			await chrome.sessions.restore(item.sessionId);
 		} else if (item.kind === "search") {
 			if (newTab || target.tabId === null) {
 				await chrome.search.query({ text: item.text, disposition: "NEW_TAB" });
@@ -661,6 +716,12 @@ var commandBarRunCommand = async function(command, target) {
 		var tab = await chrome.tabs.get(tabId);
 		sendToNativeHost({ action: "url_copied", url: tab.url, title: tab.title || "" });
 		break;
+	case "exit-split-view":
+		await chrome.tabs.unsplit(target.splitViewId);
+		break;
+	case "ungroup-tab":
+		await chrome.tabs.ungroup(tabId);
+		break;
 	case "reopen-closed-tab":
 		await chrome.sessions.restore();
 		break;
@@ -676,6 +737,182 @@ var commandBarRunCommand = async function(command, target) {
 		break;
 	default:
 		log("CommandBar::Unknown command " + command);
+	}
+};
+
+// A command that needs a second choice keeps the bar open and asks for it: the tab to split
+// with, or the group to add the tab to. The next queries are answered from `pick`.
+var commandBarAskPick = function(target, pick) {
+	var definition = COMMAND_BAR_COMMANDS.find(function(command) { return command.pick === pick; });
+	commandBarTarget = Object.assign({}, target, { pick: pick });
+	sendToNativeHost({ action: "show_command_bar", mode: target.mode, text: "", placeholder: definition.placeholder });
+};
+
+// The rows of a second choice.
+var commandBarPickResults = async function(query, target) {
+	var text = query.trim();
+	var rows;
+	if (target.pick === "split") {
+		rows = await commandBarSplitRows(text, target);
+	} else if (target.pick === "group") {
+		rows = await commandBarGroupRows(text, target);
+	} else {
+		rows = [];
+	}
+	if (target.pick === "group" || target.pick === "new-group") {
+		rows.push({ kind: "new-group", title: text || "Unnamed group", detail: "New Tab Group", hint: "",
+			text: text, symbol: "folder.badge.plus" });
+	}
+	return rows.slice(0, COMMAND_BAR_MAX_RESULTS);
+};
+
+// The tabs to split with, this window's first, and a row that opens the typed text beside the
+// tab instead. With nothing typed, the first row opens a new tab beside it.
+var commandBarSplitRows = async function(text, target) {
+	var here = await chrome.tabs.get(target.tabId);
+	var tabs = (await chrome.tabs.query({ windowType: "normal" })).filter(function(tab) {
+		return tab.id !== here.id && Boolean(tab.incognito) === Boolean(here.incognito);
+	});
+	var scored = tabs.map(function(tab) {
+		var match = text ? commandBarMatchScore(text, tab.title, tab.url || "") : 0;
+		return { tab: tab, score: match + (tab.windowId === here.windowId ? 1 : 0) };
+	}).filter(function(entry) { return entry.score >= 0 && (!text || entry.score > 1); });
+	scored.sort(function(a, b) {
+		return b.score - a.score || a.tab.windowId - b.tab.windowId || a.tab.index - b.tab.index;
+	});
+	var rows = [];
+	if (!text) {
+		rows.push({ kind: "new-tab", title: "New Tab", detail: "Beside this tab", hint: "", symbol: "plus" });
+	}
+	scored.forEach(function(entry) {
+		var tab = entry.tab;
+		rows.push({ kind: "tab", title: tab.title || commandBarDisplayUrl(tab.url || ""),
+			detail: commandBarDisplayUrl(tab.url || ""), hint: tab.windowId === here.windowId ? "Split" : "Other Window",
+			url: tab.url, tabId: tab.id });
+	});
+	if (text) {
+		rows.splice(Math.min(rows.length, COMMAND_BAR_MAX_RESULTS - 1), 0, commandBarDefaultRow(text));
+	}
+	return rows;
+};
+
+// The groups the tab can join, this window's first, matched against the typed name.
+var commandBarGroupRows = async function(text, target) {
+	if (!chrome.tabGroups) {
+		return [];
+	}
+	var found = await Promise.all([chrome.tabGroups.query({}), chrome.tabs.query({ windowType: "normal" })]);
+	var counts = new Map();
+	found[1].forEach(function(tab) {
+		if (tab.groupId !== undefined && tab.groupId !== -1) {
+			counts.set(tab.groupId, (counts.get(tab.groupId) || 0) + 1);
+		}
+	});
+	var words = text.toLowerCase().split(/\s+/).filter(Boolean);
+	var groups = found[0].filter(function(group) {
+		var title = (group.title || "").toLowerCase();
+		return group.id !== target.groupId && counts.has(group.id) &&
+			words.every(function(word) { return commandBarWordStart(title, word) !== -1; });
+	});
+	groups.sort(function(a, b) {
+		return (b.windowId === target.windowId) - (a.windowId === target.windowId);
+	});
+	return groups.map(function(group) {
+		var count = counts.get(group.id);
+		var color = group.color ? group.color[0].toUpperCase() + group.color.slice(1) : "";
+		return { kind: "group", title: group.title || "Unnamed group",
+			detail: (color ? color + ", " : "") + count + (count === 1 ? " tab" : " tabs"),
+			hint: group.windowId === target.windowId ? "Group" : "Other Window", groupId: group.id, symbol: "folder" };
+	});
+};
+
+// Act on the second choice. Enter with no row chosen takes the typed text: a new split tab that
+// opens it, or a new group named after it.
+var commandBarChoosePick = async function(target, item, text) {
+	if (target.pick === "split") {
+		if (!item || item.kind === "new-tab") {
+			await commandBarSplitWithNew(target, null);
+		} else if (item.kind === "tab") {
+			await commandBarSplitWith(target, item.tabId);
+		} else {
+			await commandBarSplitWithNew(target, item);
+		}
+	} else if (item && item.kind === "group") {
+		var group = await chrome.tabGroups.get(item.groupId);
+		if (group.windowId !== target.windowId) {
+			await chrome.tabs.move(target.tabId, { windowId: group.windowId, index: -1 });
+		}
+		await chrome.tabs.group({ groupId: item.groupId, tabIds: target.tabId });
+		await commandBarShowTab(target.tabId);
+	} else {
+		var name = item && item.kind === "new-group" ? item.text : text;
+		var groupId = await chrome.tabs.group({ tabIds: target.tabId });
+		if (name) {
+			await chrome.tabGroups.update(groupId, { title: name });
+		}
+	}
+};
+
+var commandBarShowTab = async function(tabId) {
+	var tab = await chrome.tabs.update(tabId, { active: true });
+	await chrome.windows.update(tab.windowId, { focused: true });
+};
+
+// A tab already in a split view must leave it before it can join another.
+var commandBarLeaveSplit = async function(tab) {
+	if (tab.splitViewId !== undefined && tab.splitViewId !== -1) {
+		await chrome.tabs.unsplit(tab.splitViewId);
+	}
+};
+
+// Split the bar's tab with another open tab. Chrome splits only neighbouring tabs of one window
+// with the same pinned state and group, so the other tab is moved next to it and matched first.
+var commandBarSplitWith = async function(target, otherId) {
+	var here = await chrome.tabs.get(target.tabId);
+	var other = await chrome.tabs.get(otherId);
+	await commandBarLeaveSplit(here);
+	if (other.splitViewId !== here.splitViewId) {
+		await commandBarLeaveSplit(other);
+	}
+	if (other.pinned !== here.pinned) {
+		await chrome.tabs.update(other.id, { pinned: here.pinned });
+	}
+	other = await commandBarMoveBeside(here.id, other.id);
+	if (other.groupId !== here.groupId) {
+		if (here.groupId === -1) {
+			await chrome.tabs.ungroup(other.id);
+		} else {
+			await chrome.tabs.group({ groupId: here.groupId, tabIds: other.id });
+		}
+		await commandBarMoveBeside(here.id, other.id);
+	}
+	await chrome.tabs.createSplit([here.id, other.id]);
+	await commandBarShowTab(here.id);
+};
+
+// Move tab `otherId` right after tab `hereId`, unless it is already next to it. Returns it.
+var commandBarMoveBeside = async function(hereId, otherId) {
+	var here = await chrome.tabs.get(hereId);
+	var other = await chrome.tabs.get(otherId);
+	if (other.windowId === here.windowId && Math.abs(other.index - here.index) === 1) {
+		return other;
+	}
+	// The index is where the tab ends up, counted after it leaves its old place.
+	var index = other.windowId === here.windowId && other.index < here.index ? here.index : here.index + 1;
+	await chrome.tabs.move(other.id, { windowId: here.windowId, index: index });
+	return chrome.tabs.get(other.id);
+};
+
+// Split the bar's tab with a new tab, which opens `item` (an address or a search) or nothing.
+var commandBarSplitWithNew = async function(target, item) {
+	await commandBarLeaveSplit(await chrome.tabs.get(target.tabId));
+	var properties = { splitWithTabId: target.tabId };
+	if (item && item.url) {
+		properties.url = item.url;
+	}
+	var tab = await chrome.tabs.create(properties);
+	if (item && item.kind === "search") {
+		await chrome.search.query({ text: item.text, tabId: tab.id });
 	}
 };
 

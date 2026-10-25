@@ -15,7 +15,8 @@
     "topSites",
     "search",
     "favicon",
-    "sessions"
+    "sessions",
+    "tabGroups"
   ],
   "host_permissions": [
     "<all_urls>"
