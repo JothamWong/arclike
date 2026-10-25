@@ -1,132 +1,75 @@
-# Tab Switcher
+# Arclike
 
-**Ctrl+Tab, reimagined.** Switch between browser tabs the way you switch between apps — with visual previews and most-recently-used ordering.
+Arc-style tab switching for Chrome on macOS. Arclike adds a visual Ctrl+Tab switcher of your recent tabs and a Cmd+T / Cmd+L command bar like the one in Arc and Zen.
 
-[Website](https://tabswitcher.app) · [Download](https://tabswitcher.app/Tab%20Switcher.dmg) · [Setup Guide](https://tabswitcher.app/setup)
+Arclike is a fork of [Tab Switcher](https://github.com/nechemyaspitz/tab-switcher) by Nechemya Spitz. It keeps Tab Switcher's switcher. It adds the command bar, a cap on the switcher's tabs, and a list of the tabs you visited in this session.
 
 ## Features
 
-- **Visual tab previews** — See thumbnails, favicons, and titles as you cycle through tabs
-- **Most recently used order** — Tabs ordered by recency, not position. One Ctrl+Tab instantly jumps to your last tab
-- **Copy URL shortcut** — Press Cmd+Shift+C to copy the current tab's URL to your clipboard with a confirmation toast
-- **Customizable shortcuts** — Remap both the tab switcher and copy URL shortcuts to any key combination
-- **Native performance** — A lightweight macOS companion app intercepts shortcuts at the system level
-- **Multi-browser support** — Chrome, Brave, Edge, Arc, Vivaldi, Opera, and any Chromium-based browser
-- **Auto-updates** — The native app updates itself automatically via Sparkle
+- Visual tab previews. The switcher shows thumbnails, favicons and titles as you cycle through tabs.
+- Most-recently-used order. One Ctrl+Tab goes to your last tab.
+- Session list. Like Arc and Zen, the switcher shows only the tabs you visited in this browser session, at most 5 by default.
+- Command bar. Cmd+T and Cmd+L open a search bar over the browser window. It finds open tabs, bookmarks and history, and works on every page.
+- Copy URL. Cmd+Shift+C copies the URL of the current tab and shows a confirmation.
+- A macOS companion app intercepts the shortcuts at the system level and draws the switcher and the command bar.
 
 ## How It Works
 
-Hold **Ctrl** and press **Tab** to bring up the visual switcher. Keep holding Ctrl and press Tab repeatedly to cycle through your tabs. Release Ctrl to switch to the selected tab, or press Esc while still holding Ctrl to close the switcher and stay where you are.
-
-The switcher appears on the first keypress. Hover a card to select it, then release Ctrl to switch to it or keep pressing Tab to carry on cycling from there.
-
-Press **Cmd+Shift+C** to instantly copy the active tab's URL to your clipboard.
-
-Works exactly like macOS app switching (Cmd+Tab), but for your browser tabs.
+Hold **Ctrl** and press **Tab** to show the switcher. Keep Ctrl down and press Tab again to move through your tabs. Release Ctrl to switch to the selected tab. Press Esc while you still hold Ctrl to close the switcher and stay on the current tab. You can also move the pointer over a card to select it.
 
 ### Command bar
 
-Press **Cmd+T** or **Cmd+L** to open a floating search bar over the browser window, like the one in Arc and Zen. It lists open tabs, bookmarks and history that match what you type, and completes a site's name in the field as you type it. Use the arrow keys or the mouse to pick a row. Enter opens the row: it switches to an open tab, visits a site, or searches with your default search engine. Esc closes the bar.
+Press **Cmd+T** or **Cmd+L** to open a floating search bar over the browser window. The bar lists the open tabs, bookmarks and history that match your text. When you type the start of a site name, the bar completes it in the field. Use the arrow keys or the pointer to select a row. Enter opens the row: it switches to an open tab, goes to a site, or searches with your default search engine. Esc closes the bar.
 
-- **Cmd+T** opens the choice in a new tab. Enter in an empty bar opens a plain new tab.
-- **Cmd+L** starts with the current address and opens the choice in the current tab.
+- **Cmd+T** opens the selection in a new tab. Enter in an empty bar opens a blank new tab.
+- **Cmd+L** starts with the current address and opens the selection in the current tab.
 
-The bar works on every page, including `chrome://` pages and the New Tab page, because the app draws it and not the page. The app takes Cmd+T and Cmd+L only from a browser whose extension supports the bar, so other browsers keep their own shortcuts. History from the last 90 days is matched in memory.
+The app draws the bar, not the page. That is why the bar also works on `chrome://` pages and on the New Tab page. The app takes Cmd+T and Cmd+L only from a browser whose extension supports the bar, so other browsers keep their own shortcuts. The bar matches history from the last 90 days in memory.
 
 ## Installation
 
-Tab Switcher requires two components: a browser extension and a native macOS app.
+Arclike has two parts: a Chrome extension and a macOS app. There are no prebuilt releases yet, so you build the app from source. You need macOS 14 or later and Xcode.
 
-### 1. Install the Extension
+1. Clone this repository.
+2. Create a code signing identity. Do this once:
 
-1. Download or clone this repository
-2. Open Chrome and go to `chrome://extensions`
-3. Enable **Developer mode** (toggle in top right)
-4. Click **Load unpacked** and select this folder
-5. Note the **Extension ID** shown (you'll need this later)
+   ```bash
+   ./native-host/create-signing-identity.sh
+   ```
 
-### 2. Install the Native App
+   macOS asks for your password to trust the certificate. macOS ties the Accessibility permission to the app's signature, so a fixed identity keeps the permission across rebuilds.
+3. Build and install the app:
 
-Download the macOS app from [tabswitcher.app](https://tabswitcher.app/Tab%20Switcher.dmg).
+   ```bash
+   ./native-host/install-local.sh
+   ```
 
-1. Open the DMG and drag Tab Switcher to Applications
-2. Open Tab Switcher from Applications
-3. Grant Accessibility permission when prompted
-4. Click **Enable** for your browser
-5. Enter the **Extension ID** from step 1.5 and click **Save**
+   The script installs `/Applications/Arclike.app` and registers it as Chrome's native messaging host for the extension.
+4. In Chrome, open `chrome://extensions`, turn on **Developer mode**, click **Load unpacked**, and select the `extension` folder of this repository. The extension ID is always `jlmidbafifiahhcpahkcejphlibhjapo`, because the manifest contains a fixed key.
+5. Open `/Applications/Arclike.app` once and grant the Accessibility permission when macOS asks. If macOS does not ask, open **System Settings > Privacy & Security > Accessibility** and turn on **Arclike**.
 
-### 3. Grant Accessibility Permissions
+### After a change
 
-If not prompted automatically:
-
-1. Open **System Settings > Privacy & Security > Accessibility**
-2. Enable the toggle next to Tab Switcher
+- Extension only (`extension/`): click the reload button of Arclike in `chrome://extensions`.
+- App (`native-host/`): run `./native-host/install-local.sh` again, then reload the extension. With the identity from step 2, the Accessibility permission stays granted. Without it, the script signs ad hoc, and you must turn Arclike off and on again in the Accessibility settings after each install.
 
 ## Keyboard Shortcuts
 
 | Shortcut | Action |
 |----------|--------|
-| **Ctrl+Tab** | Open switcher, cycle forward |
-| **Ctrl+Shift+Tab** | Cycle backward |
-| **Ctrl+Esc** | Close switcher without switching |
-| **Cmd+Shift+C** | Copy current tab URL |
+| **Ctrl+Tab** | Open the switcher, or move forward |
+| **Ctrl+Shift+Tab** | Move backward |
+| **Ctrl+Esc** | Close the switcher without switching |
 | **Cmd+T** | Command bar, opens in a new tab |
 | **Cmd+L** | Command bar, opens in the current tab |
-| **Alt+W** | Quick switch to last tab (no UI) |
+| **Cmd+Shift+C** | Copy the URL of the current tab |
+| **Alt+W** | Quick switch to the last tab, without the switcher |
 
-All shortcuts can be customized in the app's setup window.
-
-## Requirements
-
-- macOS 14.0 or later
-- Any Chromium-based browser (Chrome, Brave, Edge, Arc, Vivaldi, Opera, etc.)
-- Accessibility permissions for the native app
+You can change the switcher and copy-URL shortcuts in the app's setup window.
 
 ## Privacy
 
-Tab Switcher operates entirely locally. No data is collected, stored, or transmitted. See our [Privacy Policy](https://tabswitcher.app/privacy).
-
-## Building from Source
-
-### Extension
-The extension files are in the root directory. Load unpacked in Chrome.
-
-### Native App
-```bash
-cd native-host
-swift build -c release
-```
-
-The built binary will be at `native-host/.build/release/tab-switcher`. To create a full app bundle with the Sparkle framework embedded:
-
-```bash
-cd native-host
-./build.sh
-```
-
-The app bundle will be at `dist/Tab Switcher.app`. Code signing and notarization require a valid Apple Developer ID certificate and are optional for local development:
-
-```bash
-./build.sh --sign              # build + code sign
-./build.sh --sign --notarize   # build + sign + notarize
-```
-
-### Local build of the app and the extension together
-
-`native-host/install-local.sh` builds the app, signs it ad hoc, and replaces `/Applications/Tab Switcher.app`. It also allows the extension loaded unpacked from this checkout to use the app:
-
-```bash
-./native-host/install-local.sh
-```
-
-Then reload the extension in `chrome://extensions`. An ad hoc signature is new on every build, so turn Tab Switcher off and on again in **System Settings > Privacy & Security > Accessibility** after each install. Changes to the extension only (`mainsw.js`, `commandbar.js`) need only the extension reload.
-
-## Background resource usage
-
-Previews are downsampled to at most 440 pixels before they are cached or sent to the app, and
-the cache is bounded both by count and by total encoded size. Captures are debounced and only
-run for the active tab of a focused window. The app decodes previews straight to thumbnail
-size, releases them when the switcher closes, and drains temporaries after every message.
+Arclike works only on your Mac. It collects nothing and sends nothing. The extension reads favicons from Chrome's own cache, not from the network. Arclike does not check for updates, because Tab Switcher's update server describes Tab Switcher releases.
 
 ## Tests
 
@@ -139,39 +82,44 @@ node --test tests/*.test.cjs
 ## Project Structure
 
 ```
-├── manifest.json          # Chrome extension manifest
-├── mainsw.js              # Extension service worker
-├── commandbar.js          # Command bar suggestions and actions, loaded by the worker
-├── popup.html/js          # Extension popup UI
-├── icon*.png              # Extension icons
-├── tests/                 # Node tests for the service worker's switch logic
+├── extension/               # Chrome extension (load this folder unpacked)
+│   ├── manifest.json        # Manifest, with the key that fixes the extension ID
+│   ├── mainsw.js            # Service worker: tab order, switcher, native messaging
+│   ├── commandbar.js        # Command bar suggestions and actions
+│   └── popup.html/js        # Popup: connection status and settings
 ├── native-host/
-│   ├── Package.swift      # Swift package definition
-│   ├── Sources/
-│   │   └── tab-switcher/
-│   │       └── main.swift # Native macOS app
-│   ├── build.sh           # Build + sign + notarize script
-│   ├── install.sh         # Install native messaging host
-│   └── uninstall.sh       # Uninstall native messaging host
-└── docs/                  # Website (GitHub Pages)
-    ├── index.html
-    ├── setup.html
-    └── privacy.html
+│   ├── Sources/arclike/     # macOS app (Swift)
+│   ├── Info.plist           # App bundle template
+│   ├── install-local.sh     # Build, sign and install the app for local use
+│   ├── create-signing-identity.sh  # One-time local code signing identity
+│   └── build.sh             # Upstream's release script (DMG, notarization)
+├── tests/                   # Node tests for the service worker
+└── docs/                    # Upstream's website, not used by Arclike
 ```
 
 ## Troubleshooting
 
-**Extension shows "Not connected":**
-- Make sure the Tab Switcher app is running
-- Check that you've granted Accessibility permissions
-- Verify the Extension ID was entered correctly
+The extension popup shows "Not connected":
+- Check that `/Applications/Arclike.app` exists. If not, run `./native-host/install-local.sh`.
+- Check that the extension ID in `chrome://extensions` is `jlmidbafifiahhcpahkcejphlibhjapo`.
+- Reload the extension.
 
-**Ctrl+Tab doesn't work:**
-- Verify Accessibility permissions are enabled
-- Make sure the browser window is focused
+Ctrl+Tab, Cmd+T or Cmd+L does nothing:
+- Check that Arclike is on in **System Settings > Privacy & Security > Accessibility**.
+- Check that a Chrome window has focus.
 
-For more help, visit the [Setup Guide](https://tabswitcher.app/setup).
+The app writes a debug log to `~/Library/Logs/Arclike.log`.
+
+## Staying in sync with upstream
+
+The `origin` remote is the upstream Tab Switcher repository. To bring in its fixes, fetch and merge its `main` branch:
+
+```bash
+git fetch origin && git merge origin/main
+```
+
+Internal Swift type names are the same as upstream's, which keeps merges small.
 
 ## License
 
-MIT License — see [LICENSE](LICENSE)
+MIT License. See [LICENSE](LICENSE), which keeps the copyright notices of the original extension and of Tab Switcher.
