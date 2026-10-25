@@ -1,13 +1,16 @@
 /**
- * Tab Switcher - Chrome Extension Service Worker
- * Provides macOS-style Cmd+Tab switching for Chrome tabs
+ * Arclike - Chrome Extension Service Worker
+ * Arc-style tab switching and command bar for Chrome. A fork of Tab Switcher
+ * (github.com/nechemyaspitz/tab-switcher).
  */
 
 importScripts("commandbar.js");
 
 // Version checking
 var EXTENSION_VERSION = chrome.runtime.getManifest().version;
-var VERSION_CHECK_URL = "https://tabswitcher.app/version.json";
+// Upstream's version file describes Tab Switcher releases, so Arclike does not check it.
+var VERSION_CHECK_URL = null;
+var NATIVE_HOST_NAME = "com.amitrahman1026.arclike";
 
 // MRU (Most Recently Used) tab tracking
 var mru = [];
@@ -60,15 +63,15 @@ var log = function(str) {
 	}
 }
 
-// Welcome/setup page URL (update this once website is live)
-var SETUP_PAGE_URL = "https://nechemyaspitz.github.io/tab-switcher/setup.html";
+// Opened on first install, when set. Upstream's page describes Tab Switcher's setup.
+var SETUP_PAGE_URL = null;
 
 // Initialize on install/update
 chrome.runtime.onInstalled.addListener((details) => {
 	log("Extension " + details.reason);
 	
 	// Open setup page on first install
-	if (details.reason === "install") {
+	if (details.reason === "install" && SETUP_PAGE_URL) {
 		chrome.tabs.create({ url: SETUP_PAGE_URL });
 	}
 	
@@ -212,6 +215,9 @@ chrome.runtime.onStartup.addListener(function () {
 var VERSION_CHECK_INTERVAL = 6 * 60 * 60 * 1000; // 6 hours
 
 function checkForUpdates() {
+	if (!VERSION_CHECK_URL) {
+		return;
+	}
 	log("Checking for updates...");
 	fetch(VERSION_CHECK_URL, { cache: "no-cache" })
 		.then(function(response) { return response.json(); })
@@ -617,7 +623,7 @@ var connectNativeHost = function() {
 	}
 
 	try {
-		nativePort = chrome.runtime.connectNative("com.tabswitcher.native");
+		nativePort = chrome.runtime.connectNative(NATIVE_HOST_NAME);
 		log("Connected to native host");
 
 		nativePort.onMessage.addListener(function(message) {

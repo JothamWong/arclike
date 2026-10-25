@@ -15,15 +15,15 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
-APP_BUNDLE="$PROJECT_DIR/dist/Tab Switcher.app"
-BINARY_NAME="tab-switcher"
+APP_BUNDLE="$PROJECT_DIR/dist/Arclike.app"
+BINARY_NAME="arclike"
 VERSION=$(/usr/libexec/PlistBuddy -c "Print CFBundleShortVersionString" "$APP_BUNDLE/Contents/Info.plist")
-DMG_PATH="$PROJECT_DIR/dist/Tab Switcher $VERSION.dmg"
+DMG_PATH="$PROJECT_DIR/dist/Arclike $VERSION.dmg"
 
 SIGN=false
 NOTARIZE=false
 SIGNING_IDENTITY="${SIGNING_IDENTITY:-Developer ID Application}"
-NOTARY_PROFILE="${NOTARY_PROFILE:-TabSwitcher}"
+NOTARY_PROFILE="${NOTARY_PROFILE:-Arclike}"
 
 for arg in "$@"; do
     case "$arg" in
@@ -102,14 +102,14 @@ STAGE_DIR=$(mktemp -d)
 cp -R "$APP_BUNDLE" "$STAGE_DIR/"
 
 CREATE_DMG_ARGS=(
-    --volname "Tab Switcher"
+    --volname "Arclike"
     --volicon "$APP_BUNDLE/Contents/Resources/AppIcon.icns"
     --background "$SCRIPT_DIR/dmg-background.png"
     --window-pos 200 120
     --window-size 660 400
     --icon-size 160
-    --icon "Tab Switcher.app" 180 200
-    --hide-extension "Tab Switcher.app"
+    --icon "Arclike.app" 180 200
+    --hide-extension "Arclike.app"
     --app-drop-link 480 200
     --no-internet-enable
 )

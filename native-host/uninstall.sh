@@ -1,16 +1,16 @@
 #!/bin/bash
 
-# Tab Switcher Native Host Uninstaller
+# Arclike Native Host Uninstaller
 
 set -e
 
-HOST_NAME="com.tabswitcher.native"
-INSTALL_DIR="$HOME/.tab-switcher"
+HOST_NAME="com.amitrahman1026.arclike"
+INSTALL_DIR="$HOME/.arclike"
 OLD_INSTALL_DIR="$HOME/.clut-native-host"
 CHROME_NATIVE_HOSTS_DIR="$HOME/Library/Application Support/Google/Chrome/NativeMessagingHosts"
 
 echo "========================================"
-echo "Tab Switcher Native Host Uninstaller"
+echo "Arclike Native Host Uninstaller"
 echo "========================================"
 echo ""
 
@@ -42,5 +42,5 @@ echo "Uninstallation complete!"
 echo ""
 echo "Note: You may also want to remove Accessibility permissions:"
 echo "  System Settings > Privacy & Security > Accessibility"
-echo "  Remove: tab-switcher (or Tab Switcher.app)"
+echo "  Remove: arclike (or Arclike.app)"
 echo ""

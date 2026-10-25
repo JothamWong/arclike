@@ -1,16 +1,16 @@
 #!/bin/bash
 
-# Tab Switcher Native Host Installer
+# Arclike Native Host Installer
 
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-HOST_NAME="com.tabswitcher.native"
-INSTALL_DIR="$HOME/.tab-switcher"
+HOST_NAME="com.amitrahman1026.arclike"
+INSTALL_DIR="$HOME/.arclike"
 CHROME_NATIVE_HOSTS_DIR="$HOME/Library/Application Support/Google/Chrome/NativeMessagingHosts"
 
 echo "========================================"
-echo "Tab Switcher Native Host Installer"
+echo "Arclike Native Host Installer"
 echo "========================================"
 echo ""
 
@@ -32,7 +32,7 @@ echo ""
 echo "To find it:"
 echo "  1. Open Chrome and go to: chrome://extensions"
 echo "  2. Enable 'Developer mode' (toggle in top right)"
-echo "  3. Find 'Tab Switcher'"
+echo "  3. Find 'Arclike'"
 echo "  4. Copy the ID (a long string of letters)"
 echo ""
 read -p "Enter your extension ID: " EXTENSION_ID
@@ -56,9 +56,9 @@ echo "Build complete!"
 echo ""
 echo "Step 2: Installing binary..."
 mkdir -p "$INSTALL_DIR"
-cp "$SCRIPT_DIR/.build/release/tab-switcher" "$INSTALL_DIR/tab-switcher"
-chmod +x "$INSTALL_DIR/tab-switcher"
-echo "Binary installed to: $INSTALL_DIR/tab-switcher"
+cp "$SCRIPT_DIR/.build/release/arclike" "$INSTALL_DIR/arclike"
+chmod +x "$INSTALL_DIR/arclike"
+echo "Binary installed to: $INSTALL_DIR/arclike"
 
 echo ""
 echo "Step 3: Creating native messaging manifest..."
@@ -67,8 +67,8 @@ mkdir -p "$CHROME_NATIVE_HOSTS_DIR"
 cat > "$CHROME_NATIVE_HOSTS_DIR/$HOST_NAME.json" << EOF
 {
   "name": "$HOST_NAME",
-  "description": "Tab Switcher Native Helper - Detects Ctrl+Tab for MRU tab switching",
-  "path": "$INSTALL_DIR/tab-switcher",
+  "description": "Arclike native helper",
+  "path": "$INSTALL_DIR/arclike",
   "type": "stdio",
   "allowed_origins": ["chrome-extension://$EXTENSION_ID/"]
 }
@@ -89,7 +89,7 @@ echo ""
 echo "  1. Open System Settings"
 echo "  2. Go to: Privacy & Security > Accessibility"
 echo "  3. Click the + button"
-echo "  4. Add: $INSTALL_DIR/tab-switcher"
+echo "  4. Add: $INSTALL_DIR/arclike"
 echo ""
 echo "After granting permissions:"
 echo "  1. Reload the extension in Chrome (chrome://extensions)"

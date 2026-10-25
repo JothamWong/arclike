@@ -16,7 +16,7 @@ chrome.runtime.sendMessage({ action: "ping_native_host" }, function(response) {
 
   if (response && response.connected) {
     statusEl.className = "status connected";
-    statusTextEl.textContent = "Connected to Tab Switcher app";
+    statusTextEl.textContent = "Connected to the Arclike app";
   } else {
     statusEl.className = "status disconnected";
     statusTextEl.textContent = "Not connected — is the app running?";
@@ -82,7 +82,7 @@ chrome.runtime.sendMessage({ action: "get_version_info" }, function(info) {
   // Priority 2: Update available for manual installs
   if (info.isManualInstall && info.latestExtensionVersion && compareVersions(currentVersion, info.latestExtensionVersion) < 0) {
     banner.className = "update-banner update";
-    banner.innerHTML = 'Update available (v' + info.latestExtensionVersion + ') — <a href="https://tabswitcher.app/setup" target="_blank">Download</a>';
+    banner.innerHTML = 'Update available (v' + info.latestExtensionVersion + ') — <a href="https://github.com/amitrahman1026/arclike" target="_blank">Download</a>';
     banner.style.display = "block";
   }
 });

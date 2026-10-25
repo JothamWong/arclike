@@ -8,8 +8,29 @@ import UserNotifications
 import ImageIO
 
 let APP_VERSION = "3.7.5"
-let CWS_EXTENSION_ID = "pbpgegamabjlnegmfcjelciaenfkmfoo"
-let CWS_URL = "https://chromewebstore.google.com/detail/tab-switcher/pbpgegamabjlnegmfcjelciaenfkmfoo"
+
+// MARK: - Branding
+
+/// Arclike is a fork of Tab Switcher (github.com/nechemyaspitz/tab-switcher). Everything that
+/// names the app to the system lives here, so it never collides with an installed Tab Switcher.
+let APP_NAME = "Arclike"
+/// Bundle identifier, native messaging host name, and prefix of the app's notifications.
+let APP_ID = "com.amitrahman1026.arclike"
+/// Fixed by the "key" in extension/manifest.json, so it is the same wherever the folder lives.
+let CWS_EXTENSION_ID = "jlmidbafifiahhcpahkcejphlibhjapo"
+let CWS_URL = "https://github.com/amitrahman1026/arclike"
+/// Upstream's update and browser-list endpoints describe Tab Switcher releases, not Arclike's, so
+/// both are off until Arclike publishes its own.
+let VERSION_CHECK_URL: URL? = nil
+let REMOTE_BROWSER_LIST_URL: URL? = nil
+
+/// ~/Library/Application Support/Arclike: configuration and lock files.
+let appSupportDirectory: URL = {
+    let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+    let directory = appSupport.appendingPathComponent(APP_NAME)
+    try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    return directory
+}()
 
 // MARK: - Keyboard Shortcut Configuration
 
@@ -162,7 +183,7 @@ struct BrowserInfo: Identifiable, Codable {
     }
 
     // Custom Codable decoder: defaults appName to name if missing (backwards compat with v3.6 configs)
-    init(from decoder: Decoder) throws {
+    init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         id = try container.decode(String.self, forKey: .id)
         name = try container.decode(String.self, forKey: .name)
@@ -272,24 +293,15 @@ class BrowserConfigManager: ObservableObject {
     @Published var showExtensionUpdateInstructions = false
 
     private let configURL: URL = {
-        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        let configDir = appSupport.appendingPathComponent("TabSwitcher")
-        try? FileManager.default.createDirectory(at: configDir, withIntermediateDirectories: true)
-        return configDir.appendingPathComponent("browser_config.json")
+        appSupportDirectory.appendingPathComponent("browser_config.json")
     }()
 
     private let cachedBrowserListURL: URL = {
-        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        let configDir = appSupport.appendingPathComponent("TabSwitcher")
-        try? FileManager.default.createDirectory(at: configDir, withIntermediateDirectories: true)
-        return configDir.appendingPathComponent("browser_list_cache.json")
+        appSupportDirectory.appendingPathComponent("browser_list_cache.json")
     }()
 
     private let shortcutsURL: URL = {
-        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        let configDir = appSupport.appendingPathComponent("TabSwitcher")
-        try? FileManager.default.createDirectory(at: configDir, withIntermediateDirectories: true)
-        return configDir.appendingPathComponent("shortcuts.json")
+        appSupportDirectory.appendingPathComponent("shortcuts.json")
     }()
 
     init() {
@@ -313,7 +325,7 @@ class BrowserConfigManager: ObservableObject {
         updateShortcutGlobals(from: shortcuts)
         // Notify other instances
         DistributedNotificationCenter.default().postNotificationName(
-            NSNotification.Name("com.tabswitcher.shortcutsChanged"),
+            NSNotification.Name(APP_ID + ".shortcutsChanged"),
             object: nil,
             userInfo: nil,
             deliverImmediately: true
@@ -371,7 +383,8 @@ class BrowserConfigManager: ObservableObject {
     /// Fetches the browser list from the website and caches it locally.
     /// On success, reloads the browser list to pick up any new browsers.
     func fetchRemoteBrowserList() {
-        guard let url = URL(string: "https://tabswitcher.app/browsers.json") else { return }
+        // Upstream's list lives on tabswitcher.app. Arclike keeps to the built-in list.
+        guard let url = REMOTE_BROWSER_LIST_URL else { return }
 
         URLSession.shared.dataTask(with: url) { [weak self] data, response, error in
             guard let self = self,
@@ -436,13 +449,13 @@ class BrowserConfigManager: ObservableObject {
             debugLog("Using actual binary path for manifest: \(bundlePath)")
         } else {
             // Fallback to expected installation path
-            nativeHostPath = "/Applications/Tab Switcher.app/Contents/MacOS/tab-switcher"
+            nativeHostPath = "/Applications/\(APP_NAME).app/Contents/MacOS/arclike"
             debugLog("Using fallback binary path for manifest: \(nativeHostPath)")
         }
         
         for browser in browsers {
             let manifestDir = browser.fullNativeMessagingPath
-            let manifestPath = "\(manifestDir)/com.tabswitcher.native.json"
+            let manifestPath = "\(manifestDir)/\(APP_ID).json"
 
             if browser.isEnabled {
                 // Create manifest directory if needed
@@ -456,8 +469,8 @@ class BrowserConfigManager: ObservableObject {
 
                 // Create manifest
                 let manifest: [String: Any] = [
-                    "name": "com.tabswitcher.native",
-                    "description": "Tab Switcher Native Helper",
+                    "name": APP_ID,
+                    "description": "\(APP_NAME) native helper",
                     "path": nativeHostPath,
                     "type": "stdio",
                     "allowed_origins": origins
@@ -526,14 +539,11 @@ class BackgroundUpdateChecker: NSObject, ObservableObject, UNUserNotificationCen
     private var connectedExtensionVersion: String?
 
     private let updateCheckerLockFile: URL = {
-        FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".tabswitcher_updatechecker.lock")
+        appSupportDirectory.appendingPathComponent("updatechecker.lock")
     }()
 
     private let notifiedVersionsURL: URL = {
-        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        let configDir = appSupport.appendingPathComponent("TabSwitcher")
-        try? FileManager.default.createDirectory(at: configDir, withIntermediateDirectories: true)
-        return configDir.appendingPathComponent("notified_versions.json")
+        appSupportDirectory.appendingPathComponent("notified_versions.json")
     }()
 
     struct NotifiedVersions: Codable {
@@ -624,7 +634,7 @@ class BackgroundUpdateChecker: NSObject, ObservableObject, UNUserNotificationCen
         if isUpdateCheckLeader {
             try? FileManager.default.removeItem(at: updateCheckerLockFile)
             DistributedNotificationCenter.default().postNotificationName(
-                NSNotification.Name("com.tabswitcher.updateCheckerResigned"),
+                NSNotification.Name(APP_ID + ".updateCheckerResigned"),
                 object: nil, userInfo: nil, deliverImmediately: true
             )
         }
@@ -661,7 +671,7 @@ class BackgroundUpdateChecker: NSObject, ObservableObject, UNUserNotificationCen
 
     private func checkForUpdates() {
         guard isUpdateCheckLeader else { return }
-        guard let url = URL(string: "https://tabswitcher.app/version.json") else { return }
+        guard let url = VERSION_CHECK_URL else { return }
 
         let task = URLSession.shared.dataTask(with: url) { [weak self] data, _, error in
             guard let self = self, let data = data, error == nil else {
@@ -731,7 +741,7 @@ class BackgroundUpdateChecker: NSObject, ObservableObject, UNUserNotificationCen
 
     private func sendAppUpdateNotification(newVersion: String, releaseNotes: String) {
         let content = UNMutableNotificationContent()
-        content.title = "Tab Switcher Update Available"
+        content.title = "\(APP_NAME) Update Available"
         content.body = "Version \(newVersion) is available (you have \(APP_VERSION)). \(releaseNotes)"
         content.sound = .default
         content.categoryIdentifier = BackgroundUpdateChecker.appUpdateCategory
@@ -749,7 +759,7 @@ class BackgroundUpdateChecker: NSObject, ObservableObject, UNUserNotificationCen
 
     private func sendExtensionUpdateNotification(newVersion: String, currentVersion: String) {
         let content = UNMutableNotificationContent()
-        content.title = "Tab Switcher Extension Update"
+        content.title = "\(APP_NAME) Extension Update"
         content.body = "Extension v\(newVersion) is available (you have v\(currentVersion)). Click to see how to update."
         content.sound = .default
         content.categoryIdentifier = BackgroundUpdateChecker.extensionUpdateCategory
@@ -788,7 +798,7 @@ class BackgroundUpdateChecker: NSObject, ObservableObject, UNUserNotificationCen
 
         // Post distributed notification for any directly-launched instance to handle
         DistributedNotificationCenter.default().postNotificationName(
-            NSNotification.Name("com.tabswitcher.triggerAppUpdate"),
+            NSNotification.Name(APP_ID + ".triggerAppUpdate"),
             object: nil, userInfo: nil, deliverImmediately: true
         )
 
@@ -816,7 +826,7 @@ class BackgroundUpdateChecker: NSObject, ObservableObject, UNUserNotificationCen
         debugLog("User clicked extension update notification")
 
         DistributedNotificationCenter.default().postNotificationName(
-            NSNotification.Name("com.tabswitcher.showExtensionUpdate"),
+            NSNotification.Name(APP_ID + ".showExtensionUpdate"),
             object: nil, userInfo: nil, deliverImmediately: true
         )
 
@@ -951,7 +961,7 @@ struct SetupView: View {
                                 .frame(width: 64, height: 64)
                                 .padding(.bottom, 4)
                         }
-                        Text("Tab Switcher")
+                        Text(APP_NAME)
                             .font(.system(size: 18, weight: .bold))
                         Text("v\(APP_VERSION)")
                             .font(.system(size: 11))
@@ -1015,11 +1025,11 @@ struct SetupView: View {
                                 .buttonStyle(.plain)
                             }
 
-                            Text("Install the latest version from the Chrome Web Store for automatic updates.")
+                            Text("Load the latest version of the extension from the project.")
                                 .font(.system(size: 11))
                                 .foregroundColor(.secondary)
 
-                            Button("Open Chrome Web Store") {
+                            Button("Open Project Page") {
                                 if let url = URL(string: CWS_URL) {
                                     NSWorkspace.shared.open(url)
                                 }
@@ -1039,11 +1049,12 @@ struct SetupView: View {
             // Footer
             Divider()
             HStack {
-                Button("Check for Updates...") {
-                    updater.checkForUpdates()
+                Button("Project Page") {
+                    if let url = URL(string: CWS_URL) {
+                        NSWorkspace.shared.open(url)
+                    }
                 }
                 .font(.system(size: 12))
-                .disabled(!updater.canCheckForUpdates)
                 Spacer()
                 Button("Done") {
                     configManager.showingSetup = false
@@ -1178,10 +1189,10 @@ struct BrowserRowView: View {
                                         .font(.system(size: 11, weight: .medium))
                                         .foregroundColor(.orange)
                                 }
-                                Text("Install from the Chrome Web Store for automatic updates, then remove the manually loaded version.")
+                                Text("Load the extension from the project's extension folder, then remove this copy.")
                                     .font(.system(size: 10))
                                     .foregroundColor(.secondary)
-                                Button("Open Chrome Web Store") {
+                                Button("Open Project Page") {
                                     if let url = URL(string: CWS_URL) {
                                         NSWorkspace.shared.open(url)
                                     }
@@ -1202,7 +1213,7 @@ struct BrowserRowView: View {
                         .buttonStyle(.plain)
                     } else {
                         // Not enabled — simple enable button
-                        Text("Enable Tab Switcher for \(browser.name)")
+                        Text("Enable \(APP_NAME) for \(browser.name)")
                             .font(.system(size: 11))
                             .foregroundColor(.secondary)
 
@@ -2514,7 +2525,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 backing: .buffered,
                 defer: false
             )
-            setupWindow?.title = "Tab Switcher"
+            setupWindow?.title = APP_NAME
             setupWindow?.titlebarAppearsTransparent = true
             setupWindow?.contentView = NSHostingView(rootView: setupView)
             setupWindow?.center()
@@ -2540,18 +2551,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // App menu
         let appMenuItem = NSMenuItem()
         let appMenu = NSMenu()
-        appMenu.addItem(withTitle: "About Tab Switcher", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
-        let checkForUpdatesItem = NSMenuItem(title: "Check for Updates...",
-            action: #selector(SPUStandardUpdaterController.checkForUpdates(_:)), keyEquivalent: "")
-        checkForUpdatesItem.target = updaterViewModel.updaterController
-        appMenu.addItem(checkForUpdatesItem)
+        appMenu.addItem(withTitle: "About \(APP_NAME)", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
         appMenu.addItem(NSMenuItem.separator())
-        appMenu.addItem(withTitle: "Hide Tab Switcher", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
+        appMenu.addItem(withTitle: "Hide \(APP_NAME)", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
         let hideOthersItem = appMenu.addItem(withTitle: "Hide Others", action: #selector(NSApplication.hideOtherApplications(_:)), keyEquivalent: "h")
         hideOthersItem.keyEquivalentModifierMask = [.command, .option]
         appMenu.addItem(withTitle: "Show All", action: #selector(NSApplication.unhideAllApplications(_:)), keyEquivalent: "")
         appMenu.addItem(NSMenuItem.separator())
-        appMenu.addItem(withTitle: "Quit Tab Switcher", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        appMenu.addItem(withTitle: "Quit \(APP_NAME)", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         appMenuItem.submenu = appMenu
         mainMenu.addItem(appMenuItem)
         
@@ -2595,7 +2602,7 @@ extension AppDelegate {
 // MARK: - Debug Logging (to stderr, doesn't interfere with native messaging)
 
 let DEBUG_LOGGING = true // Set to true for debugging
-let DEBUG_LOG_FILE = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("tabswitcher_debug.log")
+let DEBUG_LOG_FILE = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/\(APP_NAME).log")
 
 func debugLog(_ message: String) {
     if DEBUG_LOGGING {
@@ -2993,7 +3000,7 @@ func detectParentBrowser() -> (String, pid_t)? {
 }
 
 // Lock file for event tap coordination - only one native host should have the event tap
-let eventTapLockFile = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".tabswitcher_eventtap.lock")
+let eventTapLockFile = appSupportDirectory.appendingPathComponent("eventtap.lock")
 
 // Check if we should be the event tap leader (first one to claim the lock)
 func tryBecomeEventTapLeader() -> Bool {
@@ -3059,16 +3066,16 @@ func cleanupEventTapLock() {
 }
 
 // Distributed notification names for IPC between native hosts
-let ctrlTabNotificationName = "com.tabswitcher.ctrlTab"
-let ctrlReleaseNotificationName = "com.tabswitcher.ctrlRelease"
-let ctrlCancelNotificationName = "com.tabswitcher.ctrlCancel"
-let leaderResignedNotificationName = "com.tabswitcher.leaderResigned"
-let showConfigNotificationName = "com.tabswitcher.showConfig"
-let copyUrlNotificationName = "com.tabswitcher.copyUrl"
-let shortcutsChangedNotificationName = "com.tabswitcher.shortcutsChanged"
-let commandBarNotificationName = "com.tabswitcher.commandBar"
-let commandBarReadyNotificationName = "com.tabswitcher.commandBarReady"
-let commandBarRollCallNotificationName = "com.tabswitcher.commandBarRollCall"
+let ctrlTabNotificationName = APP_ID + ".ctrlTab"
+let ctrlReleaseNotificationName = APP_ID + ".ctrlRelease"
+let ctrlCancelNotificationName = APP_ID + ".ctrlCancel"
+let leaderResignedNotificationName = APP_ID + ".leaderResigned"
+let showConfigNotificationName = APP_ID + ".showConfig"
+let copyUrlNotificationName = APP_ID + ".copyUrl"
+let shortcutsChangedNotificationName = APP_ID + ".shortcutsChanged"
+let commandBarNotificationName = APP_ID + ".commandBar"
+let commandBarReadyNotificationName = APP_ID + ".commandBarReady"
+let commandBarRollCallNotificationName = APP_ID + ".commandBarRollCall"
 
 // Setup listener for distributed notifications (for non-leader hosts)
 func setupNotificationListener() {
@@ -3202,7 +3209,7 @@ func setupNotificationListener() {
     }
 
     // Listen for app update trigger (from notification click)
-    center.addObserver(forName: NSNotification.Name("com.tabswitcher.triggerAppUpdate"), object: nil, queue: .main) { _ in
+    center.addObserver(forName: NSNotification.Name(APP_ID + ".triggerAppUpdate"), object: nil, queue: .main) { _ in
         debugLog("Received triggerAppUpdate notification")
         if let delegate = NSApp.delegate as? AppDelegate, delegate.launchedDirectly {
             allowConfigUI = true
@@ -3215,7 +3222,7 @@ func setupNotificationListener() {
     }
 
     // Listen for extension update display request (from notification click)
-    center.addObserver(forName: NSNotification.Name("com.tabswitcher.showExtensionUpdate"), object: nil, queue: .main) { _ in
+    center.addObserver(forName: NSNotification.Name(APP_ID + ".showExtensionUpdate"), object: nil, queue: .main) { _ in
         debugLog("Received showExtensionUpdate notification")
         DispatchQueue.main.async {
             allowConfigUI = true
@@ -3225,7 +3232,7 @@ func setupNotificationListener() {
     }
 
     // Listen for update checker leader resignation
-    center.addObserver(forName: NSNotification.Name("com.tabswitcher.updateCheckerResigned"), object: nil, queue: .main) { _ in
+    center.addObserver(forName: NSNotification.Name(APP_ID + ".updateCheckerResigned"), object: nil, queue: .main) { _ in
         debugLog("Update checker leader resigned, attempting to take over")
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
             BackgroundUpdateChecker.shared.tryTakeOverLeadership()
@@ -3640,7 +3647,7 @@ func checkAccessibilityPermission(prompt: Bool = false) -> Bool {
 func showAccessibilityAlert() {
     let alert = NSAlert()
     alert.messageText = "Accessibility Permission Required"
-    alert.informativeText = "Tab Switcher needs Accessibility permission to intercept Ctrl+Tab.\n\nClick 'Open System Settings' to grant permission, then relaunch the app."
+    alert.informativeText = "\(APP_NAME) needs Accessibility permission to intercept its keyboard shortcuts.\n\nClick 'Open System Settings' to grant permission, then relaunch the app."
     alert.alertStyle = .warning
     alert.addButton(withTitle: "Open System Settings")
     alert.addButton(withTitle: "Continue Anyway")
@@ -3772,7 +3779,8 @@ func main() {
     
     // Start Sparkle updater only when launched from Finder/Dock
     if directLaunch {
-        updaterViewModel.startUpdater()
+        // Sparkle stays off: its feed is upstream's, and an update from there would replace
+        // Arclike with Tab Switcher.
         BackgroundUpdateChecker.shared.skipAppUpdateNotifications = true
     }
 

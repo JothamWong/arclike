@@ -4,7 +4,7 @@ const fs = require('fs');
 const vm = require('vm');
 const path = require('path');
 
-const SRC = path.join(__dirname, '..', 'mainsw.js');
+const SRC = path.join(__dirname, '..', 'extension', 'mainsw.js');
 
 function makeEvent() {
   const listeners = [];
@@ -93,7 +93,7 @@ function load(opts = {}) {
       arrayBuffer: async () => new Uint8Array([1, 2, 3]).buffer, headers: { get: () => 'image/png' } }),
     // Scripts the worker imports run in its own context, as they do in a service worker.
     importScripts: (...files) => files.forEach(f =>
-      vm.runInContext(fs.readFileSync(path.join(__dirname, '..', f), 'utf8'), ctx, { filename: f })),
+      vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'extension', f), 'utf8'), ctx, { filename: f })),
     setTimeout, clearTimeout, setInterval: () => 0, clearInterval,
     Date, Math, JSON, Map, Set, Promise, Object, Array, String, Number, RegExp, Error, undefined,
     createImageBitmap: async () => ({ width: 2000, height: 1200, close: () => {} }),
