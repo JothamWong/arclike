@@ -611,3 +611,20 @@ test('the Split View tip is skipped where Chrome cannot split', async () => {
   await h.call(`commandBarOpen("new_tab")`);
   assert.strictEqual(h.g('commandBarTip').id, 'closed-tabs');
 });
+
+test('command hints show Chrome\'s Windows shortcuts on Windows', async () => {
+  const h = browser({ userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/140.0.0.0 Safari/537.36' });
+  await h.call(`commandBarOpen("new_tab")`);
+  const hintFor = async (text, title) => (await query(h, text)).find(r => r.title === title).hint;
+  assert.strictEqual(await hintFor('close', 'Close Tab'), 'Ctrl+W');
+  assert.strictEqual(await hintFor('copy url', 'Copy URL'), 'Alt+Shift+C');
+  assert.strictEqual(await hintFor('history', 'History'), 'Ctrl+H');
+  assert.strictEqual(await hintFor('sett', 'Settings'), '');
+});
+
+test('every macOS command hint has a Windows counterpart', () => {
+  const h = load();
+  const windows = h.g('COMMAND_BAR_WINDOWS_HINTS');
+  const missing = h.g('COMMAND_BAR_COMMANDS').filter(c => c.hint && !(c.hint in windows)).map(c => c.hint);
+  assert.deepStrictEqual(plain(missing), []);
+});

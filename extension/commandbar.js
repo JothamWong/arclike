@@ -285,6 +285,25 @@ var COMMAND_BAR_COMMANDS = [
 	{ url: "chrome://settings/clearBrowserData", title: "Clear Browsing Data", hint: "⇧⌘⌫", symbol: "trash" }
 ];
 
+// Chrome's own shortcuts for the same commands on Windows, where the macOS hints above would
+// be wrong. Copy URL is the Windows app's Alt+Shift+C, since Ctrl+Shift+C opens DevTools there.
+// Settings has no shortcut on Windows.
+var COMMAND_BAR_WINDOWS_HINTS = {
+	"⌘W": "Ctrl+W", "⌘R": "Ctrl+R", "⇧⌘C": "Alt+Shift+C", "⇧⌘T": "Ctrl+Shift+T", "⌘N": "Ctrl+N",
+	"⇧⌘N": "Ctrl+Shift+N", "⌃⌘F": "F11", "⌘,": "", "⌘Y": "Ctrl+H", "⇧⌘J": "Ctrl+J", "⌥⌘B": "Ctrl+Shift+O",
+	"⇧⌘⌫": "Ctrl+Shift+Del"
+};
+
+var commandBarOnWindows = /Windows/.test(navigator.userAgent);
+
+// A command's shortcut hint for this platform.
+var commandBarHint = function(hint) {
+	if (!hint || !commandBarOnWindows) {
+		return hint || "";
+	}
+	return hint in COMMAND_BAR_WINDOWS_HINTS ? COMMAND_BAR_WINDOWS_HINTS[hint] : hint;
+};
+
 // Conditions a command can name in `when`, checked against the bar's target. Split View needs
 // Chrome 155 or later.
 var COMMAND_BAR_WHEN = {
@@ -384,7 +403,7 @@ var commandBarMatchingCommands = function(text, target) {
 			return;
 		}
 		var match = commandBarWordStart(lowerTitle, text.toLowerCase()) === 0 ? 60 : 30;
-		var row = { kind: "command", title: title, detail: "", hint: definition.hint || "",
+		var row = { kind: "command", title: title, detail: "", hint: commandBarHint(definition.hint),
 			symbol: definition.symbol, match: match };
 		if (definition.url) {
 			row.url = definition.url;
