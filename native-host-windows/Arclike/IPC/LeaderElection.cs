@@ -5,81 +5,61 @@ using Arclike.Helpers;
 namespace Arclike.IPC
 {
     /// <summary>
-    /// Mutex-based leader election for keyboard hook ownership.
-    /// Port of tryBecomeEventTapLeader (main.swift:2292-2334).
-    /// Uses a named Mutex instead of file lock — auto-releases on crash (no stale lock problem).
+    /// Mutex-based leader election for keyboard hook ownership. Port of tryBecomeEventTapLeader
+    /// in main.swift. Windows releases a named mutex when its owner dies, so a crashed leader
+    /// leaves no stale lock: the next attempt gets an abandoned mutex, which counts as owned.
+    ///
+    /// A mutex belongs to the thread that took it, so call every method on the UI thread.
     /// </summary>
     public class LeaderElection : IDisposable
     {
-        private Mutex? _mutex;
+        private readonly Mutex _mutex = new(false, Constants.EventTapMutexName);
         public bool IsLeader { get; private set; }
 
-        /// <summary>
-        /// Try to acquire leadership. Returns true if this instance is now the leader.
-        /// </summary>
+        /// <summary>Try to take leadership. Returns true if this instance is the leader.</summary>
         public bool TryBecomeLeader()
         {
+            if (IsLeader) return true;
             try
             {
-                _mutex = new Mutex(false, Constants.EventTapMutexName, out bool createdNew);
-
-                if (createdNew)
-                {
-                    IsLeader = true;
-                    DebugLogger.Log($"We (PID {Environment.ProcessId}) are now the event tap leader");
-                    return true;
-                }
-
-                // Try to acquire with timeout
-                bool acquired = _mutex.WaitOne(0);
-                if (acquired)
-                {
-                    IsLeader = true;
-                    DebugLogger.Log($"We (PID {Environment.ProcessId}) acquired the event tap mutex");
-                    return true;
-                }
-
-                DebugLogger.Log($"Another instance owns the event tap, we (PID {Environment.ProcessId}) will listen only");
-                return false;
+                IsLeader = _mutex.WaitOne(0);
             }
             catch (AbandonedMutexException)
             {
-                // Previous owner crashed — we now own the mutex
+                // The previous owner died. The wait still succeeded.
                 IsLeader = true;
-                DebugLogger.Log($"Previous leader crashed — we (PID {Environment.ProcessId}) are the new leader");
-                return true;
             }
             catch (Exception ex)
             {
-                DebugLogger.Log($"Failed to acquire mutex: {ex.Message}");
-                return false;
-            }
-        }
-
-        /// <summary>
-        /// Release leadership. Port of cleanupEventTapLock (main.swift:2337-2351).
-        /// </summary>
-        public void Release()
-        {
-            if (IsLeader && _mutex != null)
-            {
-                try
-                {
-                    _mutex.ReleaseMutex();
-                    DebugLogger.Log("Released event tap mutex");
-                }
-                catch (Exception ex)
-                {
-                    DebugLogger.Log($"Error releasing mutex: {ex.Message}");
-                }
+                DebugLogger.Log($"Failed to take the hook mutex: {ex.Message}");
                 IsLeader = false;
             }
+
+            DebugLogger.Log(IsLeader
+                ? $"We (PID {Environment.ProcessId}) own the keyboard hook"
+                : $"Another instance owns the keyboard hook, we (PID {Environment.ProcessId}) listen only");
+            return IsLeader;
+        }
+
+        public void Release()
+        {
+            if (!IsLeader) return;
+            try
+            {
+                _mutex.ReleaseMutex();
+                DebugLogger.Log("Released the hook mutex");
+            }
+            catch (Exception ex)
+            {
+                DebugLogger.Log($"Error releasing the hook mutex: {ex.Message}");
+            }
+            IsLeader = false;
         }
 
         public void Dispose()
         {
             Release();
-            _mutex?.Dispose();
+            _mutex.Dispose();
         }
     }
 }

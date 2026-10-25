@@ -6,145 +6,141 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Threading;
+using System.Threading.Channels;
 using System.Threading.Tasks;
 using Arclike.Helpers;
 
 namespace Arclike.IPC
 {
     /// <summary>
-    /// Named-pipe IPC between native host instances.
-    /// Replaces NSDistributedNotificationCenter (main.swift:2354-2498).
-    /// Leader runs a pipe server; non-leaders connect as clients.
+    /// Named-pipe IPC between the native hosts of one desktop session. Replaces
+    /// DistributedNotificationCenter in main.swift. The leader runs the pipe server, the others
+    /// connect as clients, and the leader relays each client's message to the rest.
+    ///
+    /// Posts are queued and written by one background task, so the keyboard hook never blocks on
+    /// a pipe and messages keep their order. A leader also handles its own posts, so every
+    /// instance sees every message exactly once.
     /// </summary>
     public class InstanceCommunication
     {
-        private readonly bool _isLeader;
-        private CancellationTokenSource? _cts;
-        private readonly ConcurrentBag<NamedPipeServerStream> _serverConnections = new();
-        private NamedPipeClientStream? _clientPipe;
-        private StreamWriter? _clientWriter;
+        private static readonly Encoding Utf8 = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
 
-        // Events matching the notification names from main.swift:2354-2360
-        public event Action<string, bool, bool, string>? OnCtrlTab;      // direction, showUI, combineWindows, targetBrowser
-        public event Action<string>? OnCtrlRelease;                        // targetBrowser
-        public event Action<bool, string>? OnRequestShowUI;                // combineWindows, targetBrowser
-        public event Action<string>? OnCopyUrl;                            // targetBrowser
+        private readonly Channel<string> _outgoing = Channel.CreateUnbounded<string>(new UnboundedChannelOptions { SingleReader = true });
+        private readonly ConcurrentDictionary<Connection, byte> _clients = new();
+        private CancellationTokenSource _cts = new();
+        private CancellationTokenSource? _clientCts;
+        private Connection? _leader;
+        private volatile bool _isLeader;
+
+        public event Action<string, bool, bool, string>? OnCtrlTab;   // direction, showUI, combineWindows, targetBrowser
+        public event Action<string>? OnCtrlRelease;                     // targetBrowser
+        public event Action<string>? OnCtrlCancel;                      // targetBrowser
+        public event Action<string>? OnCopyUrl;                         // targetBrowser
+        public event Action<string, string>? OnCommandBar;              // mode, targetBrowser
+        public event Action<string, int>? OnCommandBarReady;            // browser, pid
         public event Action? OnShortcutsChanged;
         public event Action? OnLeaderResigned;
         public event Action? OnShowConfig;
+        /// <summary>A client (re)connected to a leader. It re-announces what the new leader must know.</summary>
+        public event Action? OnConnectedToLeader;
 
-        public InstanceCommunication(bool isLeader)
+        public bool IsLeader => _isLeader;
+
+        public void Start(bool isLeader)
         {
             _isLeader = isLeader;
+            _ = Task.Run(() => WriteLoop(_cts.Token));
+            if (isLeader)
+                StartServer();
+            else
+                StartClient();
         }
 
-        public void Start()
+        /// <summary>Switch from client to server after winning a leader election.</summary>
+        public void BecomeLeader()
         {
-            _cts = new CancellationTokenSource();
-
-            if (_isLeader)
-            {
-                Task.Run(() => RunServer(_cts.Token));
-                DebugLogger.Log("IPC pipe server started");
-            }
-            else
-            {
-                Task.Run(() => ConnectAsClient(_cts.Token));
-                DebugLogger.Log("IPC pipe client connecting");
-            }
+            if (_isLeader) return;
+            _isLeader = true;
+            _clientCts?.Cancel();
+            _leader?.Dispose();
+            _leader = null;
+            StartServer();
         }
 
         public void Stop()
         {
-            _cts?.Cancel();
-
             if (_isLeader)
             {
-                // Notify clients that leader is resigning
-                BroadcastMessage(new { type = "leaderResigned" });
+                // Written directly: the queue stops with the app.
+                var line = JsonSerializer.Serialize(new { type = "leaderResigned" });
+                foreach (var client in _clients.Keys)
+                    client.TryWrite(line);
             }
-
-            _clientPipe?.Dispose();
-            foreach (var conn in _serverConnections)
-            {
-                try { conn.Dispose(); } catch { }
-            }
+            _cts.Cancel();
+            _leader?.Dispose();
+            foreach (var client in _clients.Keys)
+                client.Dispose();
         }
 
-        // ---- Posting messages (called by KeyboardHook) ----
+        // ---- Posting ----
 
-        public void PostCtrlTab(string direction, bool showUI, bool combineWindows, string targetBrowser)
+        public void PostCtrlTab(string direction, bool showUI, bool combineWindows, string targetBrowser) =>
+            Post(new { type = "ctrlTab", direction, showUI, combineWindows, targetBrowser });
+
+        public void PostCtrlRelease(string targetBrowser) => Post(new { type = "ctrlRelease", targetBrowser });
+
+        public void PostCtrlCancel(string targetBrowser) => Post(new { type = "ctrlCancel", targetBrowser });
+
+        public void PostCopyUrl(string targetBrowser) => Post(new { type = "copyUrl", targetBrowser });
+
+        public void PostCommandBar(string mode, string targetBrowser) => Post(new { type = "commandBar", mode, targetBrowser });
+
+        public void PostCommandBarReady(string browser, int pid) => Post(new { type = "commandBarReady", browser, pid });
+
+        public void PostShortcutsChanged() => Post(new { type = "shortcutsChanged" });
+
+        private void Post(object message) => _outgoing.Writer.TryWrite(JsonSerializer.Serialize(message));
+
+        private async Task WriteLoop(CancellationToken ct)
         {
-            var msg = new { type = "ctrlTab", direction, showUI, combineWindows, targetBrowser };
-            if (_isLeader)
+            try
             {
-                BroadcastMessage(msg);
-                // Also invoke locally for the leader's own connections
-                OnCtrlTab?.Invoke(direction, showUI, combineWindows, targetBrowser);
+                await foreach (var line in _outgoing.Reader.ReadAllAsync(ct))
+                {
+                    if (_isLeader)
+                    {
+                        Broadcast(line, exclude: null);
+                        HandleReceivedMessage(line);
+                    }
+                    else if (_leader == null || !_leader.TryWrite(line))
+                    {
+                        DebugLogger.Log("IPC: no leader connected, message dropped");
+                    }
+                }
             }
-            else
-            {
-                SendToLeader(msg);
-            }
+            catch (OperationCanceledException) { }
         }
 
-        public void PostCtrlRelease(string targetBrowser)
+        private void Broadcast(string line, Connection? exclude)
         {
-            var msg = new { type = "ctrlRelease", targetBrowser };
-            if (_isLeader)
+            foreach (var client in _clients.Keys)
             {
-                BroadcastMessage(msg);
-                OnCtrlRelease?.Invoke(targetBrowser);
-            }
-            else
-            {
-                SendToLeader(msg);
+                if (client == exclude) continue;
+                if (!client.TryWrite(line))
+                {
+                    _clients.TryRemove(client, out _);
+                    client.Dispose();
+                }
             }
         }
 
-        public void PostRequestShowUI(bool combineWindows, string targetBrowser)
+        // ---- Server (leader) ----
+
+        private void StartServer()
         {
-            var msg = new { type = "requestShowUI", combineWindows, targetBrowser };
-            if (_isLeader)
-            {
-                BroadcastMessage(msg);
-                OnRequestShowUI?.Invoke(combineWindows, targetBrowser);
-            }
-            else
-            {
-                SendToLeader(msg);
-            }
+            _ = Task.Run(() => RunServer(_cts.Token));
+            DebugLogger.Log($"IPC pipe server started on {Constants.IpcPipeName}");
         }
-
-        public void PostCopyUrl(string targetBrowser)
-        {
-            var msg = new { type = "copyUrl", targetBrowser };
-            if (_isLeader)
-            {
-                BroadcastMessage(msg);
-                OnCopyUrl?.Invoke(targetBrowser);
-            }
-            else
-            {
-                SendToLeader(msg);
-            }
-        }
-
-        public void PostShortcutsChanged()
-        {
-            var msg = new { type = "shortcutsChanged" };
-            if (_isLeader)
-            {
-                BroadcastMessage(msg);
-                OnShortcutsChanged?.Invoke();
-            }
-            else
-            {
-                SendToLeader(msg);
-            }
-        }
-
-        // ---- Server (Leader) ----
 
         private async Task RunServer(CancellationToken ct)
         {
@@ -157,14 +153,13 @@ namespace Arclike.IPC
                         PipeDirection.InOut,
                         NamedPipeServerStream.MaxAllowedServerInstances,
                         PipeTransmissionMode.Byte,
-                        PipeOptions.Asynchronous);
+                        PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
 
                     await server.WaitForConnectionAsync(ct);
-                    _serverConnections.Add(server);
-                    DebugLogger.Log("IPC client connected to server");
-
-                    // Handle this client in a separate task
-                    _ = Task.Run(() => HandleServerClient(server, ct), ct);
+                    var connection = new Connection(server);
+                    _clients[connection] = 0;
+                    DebugLogger.Log("IPC client connected");
+                    _ = Task.Run(() => ReadClient(connection, ct), ct);
                 }
                 catch (OperationCanceledException)
                 {
@@ -173,77 +168,63 @@ namespace Arclike.IPC
                 catch (Exception ex)
                 {
                     DebugLogger.Log($"IPC server error: {ex.Message}");
-                    await Task.Delay(1000, ct);
+                    try { await Task.Delay(1000, ct); } catch (OperationCanceledException) { break; }
                 }
             }
         }
 
-        private async Task HandleServerClient(NamedPipeServerStream server, CancellationToken ct)
+        private async Task ReadClient(Connection connection, CancellationToken ct)
         {
             try
             {
-                using var reader = new StreamReader(server, Encoding.UTF8);
-                while (!ct.IsCancellationRequested && server.IsConnected)
+                while (!ct.IsCancellationRequested)
                 {
-                    var line = await reader.ReadLineAsync();
+                    var line = await connection.Reader.ReadLineAsync(ct);
                     if (line == null) break;
-
                     HandleReceivedMessage(line);
-
-                    // Re-broadcast to other clients
-                    BroadcastMessage(line, exclude: server);
+                    Broadcast(line, exclude: connection);
                 }
             }
-            catch (Exception ex)
+            catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                DebugLogger.Log($"IPC client handler error: {ex.Message}");
+                DebugLogger.Log($"IPC client read error: {ex.Message}");
             }
+            catch (OperationCanceledException) { }
+            _clients.TryRemove(connection, out _);
+            connection.Dispose();
         }
 
-        private void BroadcastMessage(object msg, NamedPipeServerStream? exclude = null)
+        // ---- Client ----
+
+        private void StartClient()
         {
-            var json = JsonSerializer.Serialize(msg);
-            BroadcastMessage(json, exclude);
+            _clientCts = CancellationTokenSource.CreateLinkedTokenSource(_cts.Token);
+            _ = Task.Run(() => RunClient(_clientCts.Token));
+            DebugLogger.Log("IPC pipe client connecting");
         }
 
-        private void BroadcastMessage(string json, NamedPipeServerStream? exclude = null)
-        {
-            foreach (var conn in _serverConnections)
-            {
-                if (conn == exclude || !conn.IsConnected) continue;
-                try
-                {
-                    var writer = new StreamWriter(conn, Encoding.UTF8, leaveOpen: true) { AutoFlush = true };
-                    writer.WriteLine(json);
-                }
-                catch
-                {
-                    // Client disconnected
-                }
-            }
-        }
-
-        // ---- Client (Non-Leader) ----
-
-        private async Task ConnectAsClient(CancellationToken ct)
+        private async Task RunClient(CancellationToken ct)
         {
             while (!ct.IsCancellationRequested)
             {
                 try
                 {
-                    _clientPipe = new NamedPipeClientStream(".", Constants.IpcPipeName, PipeDirection.InOut, PipeOptions.Asynchronous);
-                    await _clientPipe.ConnectAsync(5000, ct);
-                    _clientWriter = new StreamWriter(_clientPipe, Encoding.UTF8) { AutoFlush = true };
-
+                    var pipe = new NamedPipeClientStream(".", Constants.IpcPipeName, PipeDirection.InOut,
+                        PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
+                    await pipe.ConnectAsync(5000, ct);
+                    var connection = new Connection(pipe);
+                    _leader = connection;
                     DebugLogger.Log("IPC connected to leader");
+                    OnConnectedToLeader?.Invoke();
 
-                    using var reader = new StreamReader(_clientPipe, Encoding.UTF8);
-                    while (!ct.IsCancellationRequested && _clientPipe.IsConnected)
+                    while (!ct.IsCancellationRequested)
                     {
-                        var line = await reader.ReadLineAsync();
+                        var line = await connection.Reader.ReadLineAsync(ct);
                         if (line == null) break;
                         HandleReceivedMessage(line);
                     }
+                    _leader = null;
+                    connection.Dispose();
                 }
                 catch (OperationCanceledException)
                 {
@@ -254,29 +235,11 @@ namespace Arclike.IPC
                     DebugLogger.Log($"IPC client error: {ex.Message}");
                 }
 
-                // Reconnect after delay
-                if (!ct.IsCancellationRequested)
-                    await Task.Delay(2000, ct);
+                try { await Task.Delay(1000, ct); } catch (OperationCanceledException) { break; }
             }
         }
 
-        private void SendToLeader(object msg)
-        {
-            try
-            {
-                if (_clientWriter != null && _clientPipe?.IsConnected == true)
-                {
-                    var json = JsonSerializer.Serialize(msg);
-                    _clientWriter.WriteLine(json);
-                }
-            }
-            catch (Exception ex)
-            {
-                DebugLogger.Log($"IPC send to leader error: {ex.Message}");
-            }
-        }
-
-        // ---- Message Dispatch ----
+        // ---- Dispatch ----
 
         private void HandleReceivedMessage(string json)
         {
@@ -285,39 +248,35 @@ namespace Arclike.IPC
                 var doc = JsonNode.Parse(json)?.AsObject();
                 if (doc == null) return;
 
-                var type = doc["type"]?.GetValue<string>();
-                switch (type)
+                string Str(string name) => doc[name]?.GetValue<string>() ?? "";
+                bool Bool(string name) => doc[name]?.GetValue<bool>() ?? false;
+
+                switch (Str("type"))
                 {
                     case "ctrlTab":
-                        OnCtrlTab?.Invoke(
-                            doc["direction"]?.GetValue<string>() ?? "",
-                            doc["showUI"]?.GetValue<bool>() ?? false,
-                            doc["combineWindows"]?.GetValue<bool>() ?? false,
-                            doc["targetBrowser"]?.GetValue<string>() ?? "");
+                        OnCtrlTab?.Invoke(Str("direction"), Bool("showUI"), Bool("combineWindows"), Str("targetBrowser"));
                         break;
-
                     case "ctrlRelease":
-                        OnCtrlRelease?.Invoke(doc["targetBrowser"]?.GetValue<string>() ?? "");
+                        OnCtrlRelease?.Invoke(Str("targetBrowser"));
                         break;
-
-                    case "requestShowUI":
-                        OnRequestShowUI?.Invoke(
-                            doc["combineWindows"]?.GetValue<bool>() ?? false,
-                            doc["targetBrowser"]?.GetValue<string>() ?? "");
+                    case "ctrlCancel":
+                        OnCtrlCancel?.Invoke(Str("targetBrowser"));
                         break;
-
                     case "copyUrl":
-                        OnCopyUrl?.Invoke(doc["targetBrowser"]?.GetValue<string>() ?? "");
+                        OnCopyUrl?.Invoke(Str("targetBrowser"));
                         break;
-
+                    case "commandBar":
+                        OnCommandBar?.Invoke(Str("mode"), Str("targetBrowser"));
+                        break;
+                    case "commandBarReady":
+                        OnCommandBarReady?.Invoke(Str("browser"), doc["pid"]?.GetValue<int>() ?? 0);
+                        break;
                     case "shortcutsChanged":
                         OnShortcutsChanged?.Invoke();
                         break;
-
                     case "leaderResigned":
                         OnLeaderResigned?.Invoke();
                         break;
-
                     case "showConfig":
                         OnShowConfig?.Invoke();
                         break;
@@ -326,6 +285,44 @@ namespace Arclike.IPC
             catch (Exception ex)
             {
                 DebugLogger.Log($"IPC message parse error: {ex.Message}");
+            }
+        }
+
+        /// <summary>One pipe end, with a single writer guarded by a lock.</summary>
+        private sealed class Connection : IDisposable
+        {
+            private readonly PipeStream _pipe;
+            private readonly StreamWriter _writer;
+            private readonly object _lock = new();
+            public StreamReader Reader { get; }
+
+            public Connection(PipeStream pipe)
+            {
+                _pipe = pipe;
+                _writer = new StreamWriter(pipe, Utf8) { AutoFlush = true };
+                Reader = new StreamReader(pipe, Utf8);
+            }
+
+            public bool TryWrite(string line)
+            {
+                try
+                {
+                    lock (_lock)
+                    {
+                        if (!_pipe.IsConnected) return false;
+                        _writer.WriteLine(line);
+                    }
+                    return true;
+                }
+                catch
+                {
+                    return false;
+                }
+            }
+
+            public void Dispose()
+            {
+                try { _pipe.Dispose(); } catch { }
             }
         }
     }

@@ -37,7 +37,6 @@ namespace Arclike
         public const double OverlayPadding = 16;
         public const double OverlayCornerRadius = 20;
         public const double MaxOverlayWidth = 1200;
-        public const double ShowUIDelayMs = 150;
 
         // Setup window
         public const double SetupWidth = 460;

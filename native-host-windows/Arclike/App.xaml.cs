@@ -1,10 +1,14 @@
 using System;
+using System.Collections.Generic;
 using System.Linq;
+using System.Text.Json.Nodes;
 using System.Threading;
 using System.Windows;
+using System.Windows.Threading;
 using Arclike.Helpers;
 using Arclike.IPC;
 using Arclike.Keyboard;
+using Arclike.Models;
 using Arclike.NativeMessaging;
 using Arclike.Services;
 using Arclike.Views;
@@ -17,9 +21,20 @@ namespace Arclike
         private KeyboardHook? _keyboardHook;
         private LeaderElection? _leaderElection;
         private InstanceCommunication? _ipc;
+        private DispatcherTimer? _leaderRecoveryTimer;
         private TabSwitcherOverlay? _overlay;
+        private CommandBarWindow? _commandBar;
         private ToastOverlay? _toastOverlay;
         private SetupWindow? _setupWindow;
+
+        /// <summary>Set once our extension says it answers the command bar.</summary>
+        private volatile bool _extensionSupportsCommandBar;
+        /// <summary>
+        /// Native hosts whose extension answers the command bar, by browser. The hook reads it to
+        /// decide whether Ctrl+T and Ctrl+L go to the bar or stay with the browser.
+        /// </summary>
+        private readonly Dictionary<string, HashSet<int>> _commandBarHosts = new();
+        private readonly object _commandBarHostsLock = new();
 
         public bool LaunchedDirectly { get; private set; }
         public string? OwnerBrowserId { get; set; }
@@ -32,47 +47,44 @@ namespace Arclike
             base.OnStartup(e);
 
             Constants.EnsureAppDataDir();
-            DebugLogger.Log($"Arclike native host starting (PID {Environment.ProcessId})...");
+            DebugLogger.Log($"Arclike native host starting (PID {Environment.ProcessId}, session {System.Diagnostics.Process.GetCurrentProcess().SessionId})...");
 
             LaunchedDirectly = DetectLaunchMode(e.Args);
             DebugLogger.Log($"Launched directly: {LaunchedDirectly}");
 
-            // Initialize browser config
             BrowserConfigManager.Instance.LoadConfig();
             BrowserConfigManager.Instance.LoadShortcuts();
 
-            // Leader election for keyboard hook
-            _leaderElection = new LeaderElection();
-            bool isLeader = _leaderElection.TryBecomeLeader();
-            DebugLogger.Log($"Event tap leader: {isLeader}");
-
-            // Setup IPC
-            _ipc = new InstanceCommunication(isLeader);
-
-            // Create overlay windows (hidden initially)
-            _overlay = new TabSwitcherOverlay();
+            _overlay = new TabSwitcherOverlay { Send = SendToExtension };
+            _commandBar = new CommandBarWindow { Send = SendToExtension };
             _toastOverlay = new ToastOverlay();
 
-            // Setup keyboard hook if we're the leader
-            if (isLeader)
-            {
-                _keyboardHook = new KeyboardHook(_ipc);
-                _keyboardHook.Install();
-                DebugLogger.Log("Keyboard hook installed (we are the leader)");
-            }
-
-            // Setup IPC message handling
+            _ipc = new InstanceCommunication();
             _ipc.OnCtrlTab += OnIpcCtrlTab;
             _ipc.OnCtrlRelease += OnIpcCtrlRelease;
-            _ipc.OnRequestShowUI += OnIpcRequestShowUI;
+            _ipc.OnCtrlCancel += OnIpcCtrlCancel;
             _ipc.OnCopyUrl += OnIpcCopyUrl;
+            _ipc.OnCommandBar += OnIpcCommandBar;
+            _ipc.OnCommandBarReady += OnIpcCommandBarReady;
+            _ipc.OnConnectedToLeader += AnnounceCommandBar;
             _ipc.OnShortcutsChanged += OnIpcShortcutsChanged;
-            _ipc.OnLeaderResigned += OnIpcLeaderResigned;
-            _ipc.Start();
+            _ipc.OnLeaderResigned += () => Dispatcher.BeginInvoke(TryTakeLeadership);
+
+            _leaderElection = new LeaderElection();
+            bool isLeader = _leaderElection.TryBecomeLeader();
+            _ipc.Start(isLeader);
+            if (isLeader)
+                InstallHook();
+
+            // A leader that is killed sends no resignation. Its mutex is then abandoned, which
+            // the next attempt here picks up.
+            _leaderRecoveryTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
+            _leaderRecoveryTimer.Tick += (s, args) => TryTakeLeadership();
+            if (!isLeader)
+                _leaderRecoveryTimer.Start();
 
             if (!LaunchedDirectly)
             {
-                // Native messaging mode
                 DetectParentBrowser();
 
                 _nativeMessaging = new NativeMessagingHost();
@@ -84,26 +96,20 @@ namespace Arclike
             }
             else
             {
-                // Direct launch mode - show setup window
                 DebugLogger.Log("Direct launch - showing setup window");
                 ShowSetupWindow();
             }
-
         }
 
         private bool DetectLaunchMode(string[] args)
         {
-            // Check for chrome-extension:// argument (native messaging launch).
-            // This is the reliable indicator — Chrome always passes this arg when launching native messaging hosts.
-            // Note: Console.IsInputRedirected is NOT reliable here because WinExe apps have no console,
-            // which causes IsInputRedirected to return true even for direct launches.
+            // Chrome passes the caller's origin, chrome-extension://<id>/, as the first argument.
+            // Console.IsInputRedirected is not reliable for a WinExe, which has no console.
             if (args.Any(a => a.StartsWith("chrome-extension://")))
             {
-                DebugLogger.Log("Detected chrome-extension:// arg - launched via native messaging");
+                DebugLogger.Log($"Launched by the browser: {string.Join(" ", args)}");
                 return false;
             }
-
-            DebugLogger.Log("No chrome-extension:// arg - direct launch");
             return true;
         }
 
@@ -122,16 +128,75 @@ namespace Arclike
             }
         }
 
-        // ---- Native Messaging Handlers ----
+        // ---- Leadership ----
+
+        private void InstallHook()
+        {
+            _keyboardHook = new KeyboardHook(_ipc!, CommandBarAvailable);
+            if (!_keyboardHook.Install())
+                DebugLogger.Log("Keyboard hook failed to install");
+        }
+
+        /// <summary>Called on the UI thread, which owns the mutex once it is taken.</summary>
+        private void TryTakeLeadership()
+        {
+            if (_leaderElection == null || _leaderElection.IsLeader) return;
+            if (!_leaderElection.TryBecomeLeader()) return;
+            _leaderRecoveryTimer?.Stop();
+            _ipc!.BecomeLeader();
+            InstallHook();
+            AnnounceCommandBar();
+            DebugLogger.Log("Became the keyboard hook leader");
+        }
+
+        // ---- Command bar availability ----
+
+        /// <summary>Tell every instance that our browser's extension answers the command bar.</summary>
+        private void AnnounceCommandBar()
+        {
+            if (_extensionSupportsCommandBar && OwnerBrowserId != null)
+                _ipc?.PostCommandBarReady(OwnerBrowserId, Environment.ProcessId);
+        }
+
+        private void OnIpcCommandBarReady(string browser, int pid)
+        {
+            lock (_commandBarHostsLock)
+            {
+                if (!_commandBarHosts.TryGetValue(browser, out var pids))
+                    _commandBarHosts[browser] = pids = new HashSet<int>();
+                pids.Add(pid);
+            }
+        }
+
+        /// <summary>
+        /// Whether a running native host for `browser` can answer the command bar. A browser whose
+        /// extension cannot keeps its own Ctrl+T and Ctrl+L. Runs on the hook thread.
+        /// </summary>
+        private bool CommandBarAvailable(string browser)
+        {
+            lock (_commandBarHostsLock)
+            {
+                if (!_commandBarHosts.TryGetValue(browser, out var pids)) return false;
+                pids.RemoveWhere(pid => !Win32.IsProcessAlive((uint)pid));
+                return pids.Count > 0;
+            }
+        }
+
+        // ---- Native messaging ----
+
+        private void SendToExtension(object message) => _nativeMessaging?.SendMessage(message);
 
         private void OnNativeMessage(NativeMessage message)
         {
-            DebugLogger.Log($"Handling action: {message.Action}");
-
+            var raw = message.Raw ?? new JsonObject();
             switch (message.Action)
             {
                 case "show_switcher":
-                    Dispatcher.Invoke(() => _overlay?.ShowSwitcher(message));
+                    if (message.Tabs != null && message.SelectedIndex.HasValue)
+                    {
+                        var foreground = NativeMethods.GetForegroundWindow();
+                        Dispatcher.Invoke(() => _overlay?.ShowSwitcher(message.Tabs, message.SelectedIndex.Value, foreground));
+                    }
                     break;
 
                 case "update_selection":
@@ -143,63 +208,110 @@ namespace Arclike
                     Dispatcher.Invoke(() => _overlay?.HideSwitcher());
                     break;
 
+                case "show_command_bar":
+                {
+                    var text = Str(raw, "text");
+                    var placeholder = raw["placeholder"] is JsonValue p && p.TryGetValue<string>(out var ps) ? ps : null;
+                    var foreground = NativeMethods.GetForegroundWindow();
+                    Dispatcher.BeginInvoke(() => _commandBar?.ShowBar(text, placeholder, foreground));
+                    break;
+                }
+
+                case "command_bar_results":
+                {
+                    if (raw["seq"] is not JsonValue seqValue || !seqValue.TryGetValue<int>(out var seq)) break;
+                    var items = CommandBarItem.Parse(raw["results"] as JsonArray);
+                    var autocomplete = Str(raw, "autocomplete");
+                    var refresh = raw["refresh"] is JsonValue r && r.TryGetValue<bool>(out var rb) && rb;
+                    (string, string)? tip = null;
+                    if (raw["tip"] is JsonObject t && Str(t, "id") is { Length: > 0 } tipId)
+                        tip = (tipId, Str(t, "text"));
+                    DebugLogger.Log($"Command bar results for query {seq}: {items.Count} rows{(refresh ? " (favicons)" : "")}");
+                    Dispatcher.BeginInvoke(() => _commandBar?.ReceiveResults(seq, items, autocomplete, tip, refresh));
+                    break;
+                }
+
+                case "log":
+                    DebugLogger.Log($"Extension: {Str(raw, "message")}");
+                    break;
+
                 case "register":
-                    HandleRegister(message);
+                    HandleRegister(message, raw);
                     break;
 
                 case "ping":
-                    DebugLogger.Log("Received ping, sending pong");
                     _nativeMessaging?.SendMessage(new { action = "pong" });
                     break;
 
                 case "url_copied":
                     if (message.Url != null)
                     {
-                        DebugLogger.Log($"Received URL to copy: {message.Url}");
+                        var url = message.Url;
                         Dispatcher.Invoke(() =>
                         {
-                            try { Clipboard.SetText(message.Url); } catch { }
-                            _toastOverlay?.ShowToast("Copied!", message.Url);
+                            CopyToClipboard(url);
+                            _toastOverlay?.ShowToast("Copied!", url);
                         });
                     }
+                    break;
+
+                default:
+                    DebugLogger.Log($"Unknown action: {message.Action}");
                     break;
             }
         }
 
-        private void HandleRegister(NativeMessage message)
+        private static string Str(JsonObject obj, string key) =>
+            obj[key] is JsonValue value && value.TryGetValue<string>(out var s) ? s : "";
+
+        /// <summary>The clipboard can be held open by another process for a moment, so retry.</summary>
+        private static void CopyToClipboard(string text)
+        {
+            for (int attempt = 0; attempt < 5; attempt++)
+            {
+                try
+                {
+                    Clipboard.SetDataObject(text, copy: true);
+                    return;
+                }
+                catch (System.Runtime.InteropServices.COMException)
+                {
+                    Thread.Sleep(30);
+                }
+            }
+            DebugLogger.Log("Could not copy to the clipboard");
+        }
+
+        private void HandleRegister(NativeMessage message, JsonObject raw)
         {
             if (message.ExtensionVersion != null)
-            {
                 DebugLogger.Log($"Extension version: {message.ExtensionVersion}");
+
+            if (message.BundleId == null) return;
+
+            if (OwnerBrowserId == null)
+            {
+                OwnerBrowserId = message.BundleId;
+                if (OwnerBrowserProcessId == null)
+                {
+                    var detected = BrowserDetector.DetectParentBrowser();
+                    if (detected != null)
+                        OwnerBrowserProcessId = detected.Value.processId;
+                }
+                DebugLogger.Log($"Registered with browser (from extension): {message.BundleId}");
             }
 
-            if (message.BundleId != null)
+            var shortcuts = new
             {
-                if (OwnerBrowserId == null)
-                {
-                    OwnerBrowserId = message.BundleId;
-                    if (OwnerBrowserProcessId == null)
-                    {
-                        var detected = BrowserDetector.DetectParentBrowser();
-                        if (detected != null)
-                        {
-                            OwnerBrowserProcessId = detected.Value.processId;
-                            DebugLogger.Log($"Registered with browser (from extension): {message.BundleId} with late-detected PID {OwnerBrowserProcessId}");
-                        }
-                    }
-                }
+                tabSwitch = BrowserConfigManager.Instance.Shortcuts.TabSwitch.DisplayString,
+                copyUrl = BrowserConfigManager.Instance.Shortcuts.CopyUrl.DisplayString
+            };
+            _nativeMessaging?.SendMessage(new { action = "registered", bundleId = OwnerBrowserId ?? message.BundleId, shortcuts });
 
-                var shortcuts = new
-                {
-                    tabSwitch = BrowserConfigManager.Instance.Shortcuts.TabSwitch.DisplayString,
-                    copyUrl = BrowserConfigManager.Instance.Shortcuts.CopyUrl.DisplayString
-                };
-                _nativeMessaging?.SendMessage(new
-                {
-                    action = "registered",
-                    bundleId = OwnerBrowserId ?? message.BundleId,
-                    shortcuts
-                });
+            if (raw["features"] is JsonArray features && features.Any(f => f?.GetValue<string>() == "command_bar"))
+            {
+                _extensionSupportsCommandBar = true;
+                AnnounceCommandBar();
             }
         }
 
@@ -209,68 +321,47 @@ namespace Arclike
             Dispatcher.Invoke(() => Shutdown());
         }
 
-        // ---- IPC Handlers ----
+        // ---- IPC ----
+
+        private bool IsOurs(string targetBrowser) => OwnerBrowserId != null && OwnerBrowserId == targetBrowser;
 
         private void OnIpcCtrlTab(string direction, bool showUI, bool combineWindows, string targetBrowser)
         {
-            if (OwnerBrowserId == null || OwnerBrowserId != targetBrowser) return;
-
-            DebugLogger.Log($"Received ctrl-tab for our browser: direction={direction}, showUI={showUI}");
-            _nativeMessaging?.SendMessage(new
-            {
-                action = direction,
-                show_ui = showUI,
-                current_window_only = !combineWindows
-            });
+            if (!IsOurs(targetBrowser)) return;
+            _nativeMessaging?.SendMessage(new { action = direction, show_ui = showUI, current_window_only = !combineWindows });
         }
 
         private void OnIpcCtrlRelease(string targetBrowser)
         {
-            if (OwnerBrowserId == null || OwnerBrowserId != targetBrowser) return;
-
-            DebugLogger.Log("Received ctrl-release notification");
+            if (!IsOurs(targetBrowser)) return;
             _nativeMessaging?.SendAction("end_switch");
         }
 
-        private void OnIpcRequestShowUI(bool combineWindows, string targetBrowser)
+        private void OnIpcCtrlCancel(string targetBrowser)
         {
-            if (OwnerBrowserId == null || OwnerBrowserId != targetBrowser) return;
-
-            DebugLogger.Log("Received request-show-ui notification");
-            _nativeMessaging?.SendMessage(new
-            {
-                action = "request_show_ui",
-                current_window_only = !combineWindows
-            });
+            if (!IsOurs(targetBrowser)) return;
+            // Hide at once so Esc feels instant. The extension's own hide_switcher is then a no-op.
+            Dispatcher.BeginInvoke(() => _overlay?.HideSwitcher());
+            _nativeMessaging?.SendAction("cancel_switch");
         }
 
         private void OnIpcCopyUrl(string targetBrowser)
         {
-            if (OwnerBrowserId == null || OwnerBrowserId != targetBrowser) return;
-
-            DebugLogger.Log("Received copy-url notification for our browser");
+            if (!IsOurs(targetBrowser)) return;
             _nativeMessaging?.SendMessage(new { action = "copy_url" });
+        }
+
+        /// <summary>Ctrl+T or Ctrl+L in our browser: ask the extension, which opens the bar if its profile owns the focused window.</summary>
+        private void OnIpcCommandBar(string mode, string targetBrowser)
+        {
+            if (!_extensionSupportsCommandBar || !IsOurs(targetBrowser)) return;
+            DebugLogger.Log($"Command bar requested, mode={mode}");
+            _nativeMessaging?.SendMessage(new { action = "command_bar_open", mode });
         }
 
         private void OnIpcShortcutsChanged()
         {
-            DebugLogger.Log("Received shortcuts-changed notification, reloading");
             BrowserConfigManager.Instance.LoadShortcuts();
-        }
-
-        private void OnIpcLeaderResigned()
-        {
-            DebugLogger.Log("Leader resigned, attempting to take over");
-            if (_leaderElection != null && !_leaderElection.IsLeader)
-            {
-                Thread.Sleep(100);
-                if (_leaderElection.TryBecomeLeader())
-                {
-                    _keyboardHook = new KeyboardHook(_ipc!);
-                    _keyboardHook.Install();
-                    DebugLogger.Log("Successfully became new keyboard hook leader");
-                }
-            }
         }
 
         // ---- UI ----

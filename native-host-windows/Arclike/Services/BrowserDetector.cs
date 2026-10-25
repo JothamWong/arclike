@@ -26,6 +26,13 @@ namespace Arclike.Services
             ["chromium"] = "org.chromium.Chromium",
         };
 
+        /// <summary>The browser ID for an executable name without extension, or null.</summary>
+        public static string? BrowserIdForProcessName(string? processName)
+        {
+            if (processName == null) return null;
+            return ProcessNameToBrowserId.TryGetValue(processName, out var id) ? id : null;
+        }
+
         /// <summary>
         /// Check if a browser is installed by scanning known paths and registry.
         /// </summary>

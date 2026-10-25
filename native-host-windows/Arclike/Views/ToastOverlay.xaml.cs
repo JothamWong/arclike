@@ -51,18 +51,15 @@ namespace Arclike.Views
 
         private void PositionOverBrowser()
         {
-            IntPtr hwnd = NativeMethods.GetForegroundWindow();
-            if (hwnd != IntPtr.Zero && NativeMethods.GetWindowRect(hwnd, out var rect))
-            {
-                Left = rect.Left + (rect.Width - Width) / 2;
-                Top = rect.Bottom - Height - 20;
-            }
-            else
-            {
-                var screen = SystemParameters.WorkArea;
-                Left = screen.Left + (screen.Width - Width) / 2;
-                Top = screen.Bottom - Height - 20;
-            }
+            // Near the bottom of the browser window, kept on its monitor.
+            var target = WindowPlacement.ForWindow(NativeMethods.GetForegroundWindow()) ?? WindowPlacement.ForCursorMonitor();
+            int w = (int)Math.Round(Width * target.Scale);
+            int h = (int)Math.Round(Height * target.Scale);
+            int x = target.Frame.Left + (target.Frame.Width - w) / 2;
+            int y = target.Frame.Bottom - h - (int)Math.Round(20 * target.Scale);
+            WindowPlacement.MoveTo(this,
+                WindowPlacement.Clamp(x, w, target.WorkArea.Left, target.WorkArea.Right),
+                WindowPlacement.Clamp(y, h, target.WorkArea.Top, target.WorkArea.Bottom));
         }
     }
 }

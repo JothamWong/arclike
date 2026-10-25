@@ -88,7 +88,8 @@ namespace Arclike.Models
         public static ShortcutsConfiguration Defaults => new()
         {
             TabSwitch = new ShortcutConfig { VkCode = 0x09, Modifiers = ModifierKeysFlag.Control }, // Ctrl+Tab
-            CopyUrl = new ShortcutConfig { VkCode = 0x43, Modifiers = ModifierKeysFlag.Control | ModifierKeysFlag.Shift } // Ctrl+Shift+C
+            // Alt+Shift+C. Ctrl+Shift+C is Chrome's "inspect element" on Windows.
+            CopyUrl = new ShortcutConfig { VkCode = 0x43, Modifiers = ModifierKeysFlag.Alt | ModifierKeysFlag.Shift }
         };
     }
 }

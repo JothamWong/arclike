@@ -1,8 +1,7 @@
 using System;
-using System.Diagnostics;
+using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using System.Threading;
-using System.Windows.Threading;
 using Arclike.Helpers;
 using Arclike.IPC;
 using Arclike.Models;
@@ -11,210 +10,245 @@ using Arclike.Services;
 namespace Arclike.Keyboard
 {
     /// <summary>
-    /// Low-level keyboard hook for intercepting Ctrl+Tab and other shortcuts.
-    /// Port of eventTapCallback (main.swift:2610-2711) and setupEventTap (main.swift:2715-2736).
-    /// Uses SetWindowsHookEx(WH_KEYBOARD_LL) instead of CGEvent.tapCreate().
+    /// Low-level keyboard hook for Ctrl+Tab, Ctrl+Esc, the copy-URL shortcut and the command bar
+    /// keys (Ctrl+T, Ctrl+L). Port of eventTapCallback in main.swift.
+    ///
+    /// The hook runs on its own thread with its own message loop. Windows drops a low-level hook
+    /// whose callback is too slow (LowLevelHooksTimeout), so the callback never waits on the UI
+    /// thread, the pipes or a process lookup it has done before: IPC posts are queued, and the
+    /// browser behind each process ID is cached.
+    ///
+    /// Injected keys (LLKHF_INJECTED) are handled like typed ones, so the headless tests can
+    /// drive the hook with SendInput.
     /// </summary>
     public class KeyboardHook
     {
-        private IntPtr _hookId = IntPtr.Zero;
-        private NativeMethods.LowLevelKeyboardProc? _hookProc;
+        private const int VK_T = 0x54;
+        private const int VK_L = 0x4C;
+
         private readonly InstanceCommunication _ipc;
+        private readonly Func<string, bool> _commandBarAvailable;
+        private NativeMethods.LowLevelKeyboardProc? _hookProc;
+        private IntPtr _hookId = IntPtr.Zero;
+        private Thread? _thread;
+        private uint _threadId;
 
-        // State tracking (mirrors globals from main.swift:2199-2207)
-        private bool _switchModifierIsPressed;
+        // Touched only on the hook thread.
         private bool _switchInProgress;
-        private int _tabPressCount;
-        private DispatcherTimer? _showUITimer;
+        private string? _switchBrowser;
+        private int _commandKeyDown;
+        private bool _swallowEscapeUp;
+        private readonly Dictionary<uint, string?> _browserByProcess = new();
 
-        public KeyboardHook(InstanceCommunication ipc)
+        public KeyboardHook(InstanceCommunication ipc, Func<string, bool> commandBarAvailable)
         {
             _ipc = ipc;
+            _commandBarAvailable = commandBarAvailable;
         }
 
-        public void Install()
+        /// <summary>Start the hook thread. Returns whether the hook was installed.</summary>
+        public bool Install()
         {
-            _hookProc = HookCallback;
-            using var process = Process.GetCurrentProcess();
-            using var module = process.MainModule!;
-            _hookId = NativeMethods.SetWindowsHookEx(
-                NativeMethods.WH_KEYBOARD_LL,
-                _hookProc,
-                NativeMethods.GetModuleHandle(module.ModuleName!),
-                0);
-
-            if (_hookId == IntPtr.Zero)
+            using var ready = new ManualResetEventSlim();
+            _thread = new Thread(() => Run(ready))
             {
-                DebugLogger.Log($"Failed to install keyboard hook: {Marshal.GetLastWin32Error()}");
-            }
-            else
-            {
-                DebugLogger.Log("Keyboard hook installed successfully");
-            }
+                IsBackground = true,
+                Name = "KeyboardHook",
+                Priority = ThreadPriority.AboveNormal
+            };
+            _thread.Start();
+            ready.Wait(TimeSpan.FromSeconds(5));
+            return _hookId != IntPtr.Zero;
         }
 
         public void Uninstall()
         {
-            if (_hookId != IntPtr.Zero)
+            if (_threadId != 0)
             {
-                NativeMethods.UnhookWindowsHookEx(_hookId);
-                _hookId = IntPtr.Zero;
-                DebugLogger.Log("Keyboard hook uninstalled");
+                Win32.PostThreadMessage(_threadId, Win32.WM_QUIT, IntPtr.Zero, IntPtr.Zero);
+                _thread?.Join(TimeSpan.FromSeconds(1));
+                _threadId = 0;
             }
         }
 
-        /// <summary>
-        /// Low-level keyboard callback. Port of eventTapCallback (main.swift:2610-2711).
-        /// </summary>
+        private void Run(ManualResetEventSlim ready)
+        {
+            _threadId = Win32.GetCurrentThreadId();
+            _hookProc = HookCallback;
+            _hookId = NativeMethods.SetWindowsHookEx(NativeMethods.WH_KEYBOARD_LL, _hookProc, NativeMethods.GetModuleHandle(null!), 0);
+            if (_hookId == IntPtr.Zero)
+            {
+                DebugLogger.Log($"Failed to install keyboard hook: {Marshal.GetLastWin32Error()}");
+                ready.Set();
+                return;
+            }
+            DebugLogger.Log("Keyboard hook installed");
+            ready.Set();
+
+            while (Win32.GetMessage(out var msg, IntPtr.Zero, 0, 0) > 0)
+            {
+                Win32.TranslateMessage(ref msg);
+                Win32.DispatchMessage(ref msg);
+            }
+
+            NativeMethods.UnhookWindowsHookEx(_hookId);
+            _hookId = IntPtr.Zero;
+            DebugLogger.Log("Keyboard hook uninstalled");
+        }
+
         private IntPtr HookCallback(int nCode, IntPtr wParam, IntPtr lParam)
         {
             if (nCode < 0)
                 return NativeMethods.CallNextHookEx(_hookId, nCode, wParam, lParam);
 
-            var hookStruct = Marshal.PtrToStructure<NativeMethods.KBDLLHOOKSTRUCT>(lParam);
-            int vkCode = (int)hookStruct.vkCode;
-            int msg = (int)wParam;
-
-            // Only process when a supported browser is in the foreground
-            var frontmostBrowser = GetFrontmostBrowserId();
-            if (frontmostBrowser == null)
-                return NativeMethods.CallNextHookEx(_hookId, nCode, wParam, lParam);
-
-            var shortcuts = BrowserConfigManager.Instance.Shortcuts;
-
-            // Get current modifier state
-            bool ctrlDown = (NativeMethods.GetAsyncKeyState(NativeMethods.VK_CONTROL) & 0x8000) != 0;
-            bool shiftDown = (NativeMethods.GetAsyncKeyState(NativeMethods.VK_SHIFT) & 0x8000) != 0;
-            bool altDown = (NativeMethods.GetAsyncKeyState(NativeMethods.VK_MENU) & 0x8000) != 0;
-
-            var currentMods = ModifierKeysFlag.None;
-            if (ctrlDown) currentMods |= ModifierKeysFlag.Control;
-            if (shiftDown) currentMods |= ModifierKeysFlag.Shift;
-            if (altDown) currentMods |= ModifierKeysFlag.Alt;
-
-            // Determine the primary modifier for tab-switch (minus Shift, which toggles direction)
-            var switchBaseMods = shortcuts.TabSwitch.Modifiers & ~ModifierKeysFlag.Shift;
-            var currentBaseMods = currentMods & ~ModifierKeysFlag.Shift;
-
-            // Handle key-up for modifier release detection
-            if (msg == NativeMethods.WM_KEYUP || msg == NativeMethods.WM_SYSKEYUP)
+            try
             {
-                // Check if this is the primary switch modifier being released
-                bool isControlKey = vkCode == NativeMethods.VK_CONTROL ||
-                                    vkCode == NativeMethods.VK_LCONTROL ||
-                                    vkCode == NativeMethods.VK_RCONTROL;
-                bool isAltKey = vkCode == NativeMethods.VK_MENU ||
-                                vkCode == NativeMethods.VK_LMENU ||
-                                vkCode == NativeMethods.VK_RMENU;
-
-                bool switchModReleased = false;
-                if (switchBaseMods.HasFlag(ModifierKeysFlag.Control) && isControlKey)
-                    switchModReleased = true;
-                if (switchBaseMods.HasFlag(ModifierKeysFlag.Alt) && isAltKey)
-                    switchModReleased = true;
-
-                if (switchModReleased && _switchModifierIsPressed && _switchInProgress)
-                {
-                    _showUITimer?.Stop();
-                    _showUITimer = null;
-                    _ipc.PostCtrlRelease(frontmostBrowser);
-                    _switchInProgress = false;
-                    _tabPressCount = 0;
-                    _switchModifierIsPressed = false;
-                }
-
-                return NativeMethods.CallNextHookEx(_hookId, nCode, wParam, lParam);
+                if (Handle((int)wParam, Marshal.PtrToStructure<NativeMethods.KBDLLHOOKSTRUCT>(lParam)))
+                    return (IntPtr)1;
             }
-
-            // Handle key-down events
-            if (msg == NativeMethods.WM_KEYDOWN || msg == NativeMethods.WM_SYSKEYDOWN)
+            catch (Exception ex)
             {
-                // Check for tab-switch shortcut (Shift excluded from base match)
-                if (vkCode == shortcuts.TabSwitch.VkCode && currentBaseMods == switchBaseMods && switchBaseMods != ModifierKeysFlag.None)
-                {
-                    if (!_switchInProgress)
-                    {
-                        _switchInProgress = true;
-                        _tabPressCount = 0;
-                    }
-                    _switchModifierIsPressed = true;
-                    _tabPressCount++;
-
-                    var direction = shiftDown ? "cycle_prev" : "cycle_next";
-                    bool combineWindows = false;
-
-                    DebugLogger.Log($"Broadcasting tab switch: direction={direction}, tabPressCount={_tabPressCount}");
-
-                    if (_tabPressCount == 1)
-                    {
-                        _ipc.PostCtrlTab(direction, showUI: false, combineWindows, frontmostBrowser);
-
-                        // Schedule show UI after delay
-                        _showUITimer?.Stop();
-                        _showUITimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(Constants.ShowUIDelayMs) };
-                        _showUITimer.Tick += (s, e) =>
-                        {
-                            _showUITimer?.Stop();
-                            _ipc.PostRequestShowUI(combineWindows, frontmostBrowser);
-                        };
-                        _showUITimer.Start();
-                    }
-                    else
-                    {
-                        _showUITimer?.Stop();
-                        _showUITimer = null;
-                        _ipc.PostCtrlTab(direction, showUI: true, combineWindows, frontmostBrowser);
-                    }
-
-                    // Swallow the key (return non-zero to block)
-                    return (IntPtr)1;
-                }
-
-                // Check for copy-URL shortcut
-                if (vkCode == shortcuts.CopyUrl.VkCode && currentMods == shortcuts.CopyUrl.Modifiers && shortcuts.CopyUrl.Modifiers != ModifierKeysFlag.None)
-                {
-                    DebugLogger.Log("Copy URL shortcut detected");
-                    _ipc.PostCopyUrl(frontmostBrowser);
-                    return (IntPtr)1;
-                }
+                DebugLogger.Log($"Keyboard hook error: {ex.Message}");
             }
-
             return NativeMethods.CallNextHookEx(_hookId, nCode, wParam, lParam);
         }
 
+        /// <summary>Handle one key event. Returns true to swallow it.</summary>
+        private bool Handle(int msg, NativeMethods.KBDLLHOOKSTRUCT key)
+        {
+            int vk = (int)key.vkCode;
+            bool isDown = msg == NativeMethods.WM_KEYDOWN || msg == NativeMethods.WM_SYSKEYDOWN;
+            bool isUp = msg == NativeMethods.WM_KEYUP || msg == NativeMethods.WM_SYSKEYUP;
+            var shortcuts = BrowserConfigManager.Instance.Shortcuts;
+            var switchBaseMods = shortcuts.TabSwitch.Modifiers & ~ModifierKeysFlag.Shift;
+
+            // Key-ups first, whatever window is in front: the command bar or the switcher may
+            // have taken the foreground since the key went down.
+            if (isUp)
+            {
+                if (vk == _commandKeyDown)
+                    _commandKeyDown = 0;
+
+                if (vk == NativeMethods.VK_ESCAPE && _swallowEscapeUp)
+                {
+                    _swallowEscapeUp = false;
+                    return true;
+                }
+
+                if (_switchInProgress && IsModifierKeyOf(vk, switchBaseMods))
+                {
+                    DebugLogger.Log("Switch modifier released - ending switch");
+                    _ipc.PostCtrlRelease(_switchBrowser!);
+                    _switchInProgress = false;
+                    _switchBrowser = null;
+                }
+                return false;
+            }
+
+            if (!isDown)
+                return false;
+
+            var browser = ForegroundBrowserId();
+            if (browser == null)
+                return false;
+
+            var currentMods = CurrentModifiers();
+            var currentBaseMods = currentMods & ~ModifierKeysFlag.Shift;
+
+            // Esc while the switch modifier is still held: cancel without changing tabs. Ctrl+Esc
+            // would also open the Start menu, so the key-up is swallowed too.
+            if (_switchInProgress && vk == NativeMethods.VK_ESCAPE && (currentMods & switchBaseMods) == switchBaseMods)
+            {
+                DebugLogger.Log("Escape pressed during switch - cancelling");
+                _ipc.PostCtrlCancel(_switchBrowser!);
+                _switchInProgress = false;
+                _switchBrowser = null;
+                _swallowEscapeUp = true;
+                return true;
+            }
+
+            // Ctrl+T and Ctrl+L open the command bar instead of the browser's new tab and address
+            // bar, when a host for this browser can answer it. Ctrl+Shift+T and the others pass.
+            if ((vk == VK_T || vk == VK_L) && currentMods == ModifierKeysFlag.Control && _commandBarAvailable(browser))
+            {
+                // Low-level hooks get no auto-repeat flag: a second key-down before the key-up
+                // is a repeat.
+                if (_commandKeyDown != vk)
+                {
+                    _commandKeyDown = vk;
+                    _ipc.PostCommandBar(vk == VK_T ? "new_tab" : "current_tab", browser);
+                }
+                return true;
+            }
+
+            // Tab-switch shortcut (Shift is not part of the match: it reverses the direction).
+            if (vk == shortcuts.TabSwitch.VkCode && switchBaseMods != ModifierKeysFlag.None && currentBaseMods == switchBaseMods)
+            {
+                if (!_switchInProgress)
+                {
+                    _switchInProgress = true;
+                    _switchBrowser = browser;
+                }
+                var direction = currentMods.HasFlag(ModifierKeysFlag.Shift) ? "cycle_prev" : "cycle_next";
+                // showUI stays true for every press, as in main.swift: the extension shows the
+                // switcher on the first press.
+                _ipc.PostCtrlTab(direction, showUI: true, combineWindows: false, _switchBrowser!);
+                return true;
+            }
+
+            if (vk == shortcuts.CopyUrl.VkCode && shortcuts.CopyUrl.Modifiers != ModifierKeysFlag.None && currentMods == shortcuts.CopyUrl.Modifiers)
+            {
+                DebugLogger.Log("Copy URL shortcut detected");
+                _ipc.PostCopyUrl(browser);
+                return true;
+            }
+
+            return false;
+        }
+
+        private static ModifierKeysFlag CurrentModifiers()
+        {
+            static bool Down(int vk) => (NativeMethods.GetAsyncKeyState(vk) & 0x8000) != 0;
+            var mods = ModifierKeysFlag.None;
+            if (Down(NativeMethods.VK_CONTROL)) mods |= ModifierKeysFlag.Control;
+            if (Down(NativeMethods.VK_SHIFT)) mods |= ModifierKeysFlag.Shift;
+            if (Down(NativeMethods.VK_MENU)) mods |= ModifierKeysFlag.Alt;
+            if (Down(NativeMethods.VK_LWIN) || Down(NativeMethods.VK_RWIN)) mods |= ModifierKeysFlag.Win;
+            return mods;
+        }
+
+        private static bool IsModifierKeyOf(int vk, ModifierKeysFlag mods)
+        {
+            if (mods.HasFlag(ModifierKeysFlag.Control) &&
+                (vk == NativeMethods.VK_CONTROL || vk == NativeMethods.VK_LCONTROL || vk == NativeMethods.VK_RCONTROL))
+                return true;
+            if (mods.HasFlag(ModifierKeysFlag.Alt) &&
+                (vk == NativeMethods.VK_MENU || vk == NativeMethods.VK_LMENU || vk == NativeMethods.VK_RMENU))
+                return true;
+            if (mods.HasFlag(ModifierKeysFlag.Win) && (vk == NativeMethods.VK_LWIN || vk == NativeMethods.VK_RWIN))
+                return true;
+            return false;
+        }
+
         /// <summary>
-        /// Get the frontmost browser's ID. Port of isSupportedBrowserActive (main.swift:2132-2149)
-        /// and getFrontmostBrowserBundleId (main.swift:2536-2549).
+        /// The browser ID of the foreground window's process, or null if it is not a known
+        /// browser. Port of getActiveBrowserBundleId in main.swift.
         /// </summary>
-        private string? GetFrontmostBrowserId()
+        private string? ForegroundBrowserId()
         {
             IntPtr hwnd = NativeMethods.GetForegroundWindow();
             if (hwnd == IntPtr.Zero) return null;
-
             NativeMethods.GetWindowThreadProcessId(hwnd, out uint processId);
             if (processId == 0) return null;
 
-            try
-            {
-                using var process = Process.GetProcessById((int)processId);
-                var processName = process.ProcessName.ToLowerInvariant();
+            if (_browserByProcess.TryGetValue(processId, out var cached))
+                return cached;
+            if (_browserByProcess.Count > 256)
+                _browserByProcess.Clear();
 
-                // Map process name to browser ID
-                return processName switch
-                {
-                    "chrome" => "com.google.Chrome",
-                    "brave" => "com.brave.Browser",
-                    "msedge" => "com.microsoft.edgemac",
-                    "vivaldi" => "com.vivaldi.Vivaldi",
-                    "opera" => "com.operasoftware.Opera",
-                    "thorium" => "org.chromium.Thorium",
-                    _ => null
-                };
-            }
-            catch
-            {
-                return null;
-            }
+            var browser = BrowserDetector.BrowserIdForProcessName(Win32.ProcessImageName(processId));
+            _browserByProcess[processId] = browser;
+            return browser;
         }
     }
 }

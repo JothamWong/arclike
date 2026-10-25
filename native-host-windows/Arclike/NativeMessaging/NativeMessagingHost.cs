@@ -27,7 +27,7 @@ namespace Arclike.NativeMessaging
 
     /// <summary>
     /// Native messaging host implementing Chrome's 4-byte length-prefixed JSON protocol over stdin/stdout.
-    /// Port of sendMessage() (main.swift:1978-1989) and readMessage() (main.swift:1995-2025).
+    /// Port of sendMessage() and readMessage() in main.swift.
     /// </summary>
     public class NativeMessagingHost
     {
@@ -135,9 +135,15 @@ namespace Arclike.NativeMessaging
                 }
 
                 uint length = BitConverter.ToUInt32(lengthBuffer, 0);
-                if (length == 0 || length > 10 * 1024 * 1024)
+                if (length == 0)
+                    return null;
+                // Chrome sends at most 64 MiB. A larger length means the stream is out of step,
+                // and every later read would start in the middle of a message, so stop.
+                if (length > 64 * 1024 * 1024)
                 {
-                    DebugLogger.Log($"Invalid message length: {length}");
+                    DebugLogger.Log($"Invalid message length: {length} - closing");
+                    _running = false;
+                    OnDisconnected?.Invoke();
                     return null;
                 }
 
@@ -146,7 +152,9 @@ namespace Arclike.NativeMessaging
                 bytesRead = ReadExact(_stdin, messageBuffer, (int)length);
                 if (bytesRead < (int)length)
                 {
-                    DebugLogger.Log("Incomplete message data");
+                    DebugLogger.Log("Incomplete message data - closing");
+                    _running = false;
+                    OnDisconnected?.Invoke();
                     return null;
                 }
 
@@ -255,6 +263,8 @@ namespace Arclike.NativeMessaging
                             var imageBytes = Convert.FromBase64String(base64);
                             thumbnail = new BitmapImage();
                             thumbnail.BeginInit();
+                            // Decode straight to preview size, as main.swift does with ImageIO.
+                            thumbnail.DecodePixelWidth = 440;
                             thumbnail.StreamSource = new MemoryStream(imageBytes);
                             thumbnail.CacheOption = BitmapCacheOption.OnLoad;
                             thumbnail.EndInit();

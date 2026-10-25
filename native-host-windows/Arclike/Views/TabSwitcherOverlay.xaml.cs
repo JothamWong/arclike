@@ -1,167 +1,159 @@
 using System;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
+using System.Linq;
 using System.Windows;
+using System.Windows.Input;
+using System.Windows.Interop;
+using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using Arclike.Helpers;
 using Arclike.Models;
-using Arclike.NativeMessaging;
 
 namespace Arclike.Views
 {
     /// <summary>
-    /// Floating overlay window for tab switcher UI.
-    /// Port of TabSwitcherWindow (main.swift:1682-1704) and TabSwitcherView (main.swift:1536-1573).
-    /// Uses WindowStyle=None, AllowsTransparency, Topmost — must NOT steal focus from browser.
+    /// Floating overlay for the tab switcher. Port of TabSwitcherWindow and TabSwitcherView in
+    /// main.swift. It never takes focus from the browser (ShowActivated=False, WS_EX_NOACTIVATE),
+    /// because releasing the switch modifier in the browser is what ends the switch.
     /// </summary>
     public partial class TabSwitcherOverlay : Window
     {
-        private ObservableCollection<TabViewModel> _tabs = new();
+        private readonly ObservableCollection<TabViewModel> _topRow = new();
+        private readonly ObservableCollection<TabViewModel> _bottomRow = new();
+        private TabViewModel[] _tabs = Array.Empty<TabViewModel>();
+        private Win32.POINT _cursorAtShow;
+
+        /// <summary>Sends a message to the extension.</summary>
+        public Action<object>? Send { get; set; }
 
         public TabSwitcherOverlay()
         {
             InitializeComponent();
-            TabCards.ItemsSource = _tabs;
+            TopRow.ItemsSource = _topRow;
+            BottomRow.ItemsSource = _bottomRow;
+            SourceInitialized += (s, e) =>
+            {
+                var hwnd = new WindowInteropHelper(this).Handle;
+                Win32.AddExtendedStyle(hwnd, Win32.WS_EX_NOACTIVATE | Win32.WS_EX_TOOLWINDOW);
+            };
         }
 
         /// <summary>
-        /// Show the switcher overlay with tabs.
-        /// Port of TabSwitcherState.showSwitcher (main.swift:1301-1306) and
-        /// AppDelegate visibility observer (main.swift:1800-1858).
+        /// Show the switcher over `browserWindow`. Port of TabSwitcherState.showSwitcher and the
+        /// placement in AppDelegate.
         /// </summary>
-        public void ShowSwitcher(NativeMessage message)
+        public void ShowSwitcher(TabInfo[] tabs, int selectedIndex, IntPtr browserWindow)
         {
-            if (message.Tabs == null || message.Tabs.Length == 0) return;
+            if (tabs.Length == 0) return;
 
-            _tabs.Clear();
-            for (int i = 0; i < message.Tabs.Length; i++)
-            {
-                _tabs.Add(new TabViewModel(message.Tabs[i], i == message.SelectedIndex));
-            }
+            var target = WindowPlacement.ForWindow(browserWindow) ?? WindowPlacement.ForCursorMonitor();
+            double scale = target.Scale;
+            double frameWidth = target.Frame.Width / scale;
+            double maxWidth = Math.Min(frameWidth - 40, Constants.MaxOverlayWidth);
+            var layout = SwitcherLayout.Compute(tabs.Length, maxWidth);
 
-            PositionAndSize(message.Tabs.Length);
+            _tabs = tabs.Select((tab, i) => new TabViewModel(tab, i, i == selectedIndex, layout)).ToArray();
+            _topRow.Clear();
+            _bottomRow.Clear();
+            int topCount = layout.RowSizes.Count > 0 ? layout.RowSizes[0] : 0;
+            foreach (var vm in _tabs.Take(topCount)) _topRow.Add(vm);
+            foreach (var vm in _tabs.Skip(topCount)) _bottomRow.Add(vm);
+            BottomRow.Visibility = _bottomRow.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+
+            double width = Math.Min(layout.ContentWidth, maxWidth);
+            double height = layout.ContentHeight;
+
+            // Centered on the browser window, a little above the middle, kept on its monitor.
+            var frame = target.Frame;
+            var work = target.WorkArea;
+            int widthPx = (int)Math.Round(width * scale);
+            int heightPx = (int)Math.Round(height * scale);
+            int x = frame.Left + (frame.Width - widthPx) / 2;
+            int y = frame.Top + (frame.Height - heightPx) / 2 - (int)(frame.Height * 0.08);
+            x = WindowPlacement.Clamp(x, widthPx, work.Left, work.Right);
+            y = WindowPlacement.Clamp(y, heightPx, work.Top, work.Bottom);
+
+            // Move first, so WPF takes the target monitor's scale before the size is set.
+            WindowPlacement.MoveTo(this, x, y);
+            Width = width;
+            Height = height;
+            WindowPlacement.MoveTo(this, x, y);
+
+            Win32.GetCursorPos(out _cursorAtShow);
             Show();
-            DebugLogger.Log($"Showing switcher with {message.Tabs.Length} tabs");
+            DebugLogger.Log($"Showing switcher: {tabs.Length} tabs, rows=[{string.Join(",", layout.RowSizes)}], card={layout.CardWidth}x{layout.CardHeight}, at {x},{y} scale={scale}");
         }
 
         public void UpdateSelection(int selectedIndex)
         {
-            for (int i = 0; i < _tabs.Count; i++)
-            {
-                _tabs[i].IsSelected = (i == selectedIndex);
-            }
-
-            // Scroll to selected
-            if (selectedIndex >= 0 && selectedIndex < _tabs.Count)
-            {
-                // Find the visual element and bring it into view
-                var container = TabCards.ItemContainerGenerator.ContainerFromIndex(selectedIndex) as FrameworkElement;
-                container?.BringIntoView();
-            }
+            foreach (var vm in _tabs)
+                vm.IsSelected = vm.Index == selectedIndex;
         }
 
         public void HideSwitcher()
         {
+            if (!IsVisible) return;
             Hide();
-            _tabs.Clear();
+            // Release the previews, as main.swift does on hide.
+            _topRow.Clear();
+            _bottomRow.Clear();
+            _tabs = Array.Empty<TabViewModel>();
             DebugLogger.Log("Hiding switcher");
         }
 
         /// <summary>
-        /// Position and size the overlay, centered on the browser window.
-        /// Port of AppDelegate positioning logic (main.swift:1806-1852).
-        /// Uses GetWindowRect instead of AXUIElement.
+        /// Hover selects a card and tells the extension, so releasing the modifier switches to it.
+        /// It waits until the cursor moves, so a card that appears under a resting cursor is not
+        /// selected by accident.
         /// </summary>
-        private void PositionAndSize(int tabCount)
+        private void Card_MouseMove(object sender, MouseEventArgs e)
         {
-            double cardWidth = Constants.CardWidth;
-            double cardSpacing = Constants.CardSpacing;
-            double padding = Constants.OverlayPadding;
-            double cardHeight = Constants.CardHeight;
+            if (sender is not FrameworkElement { DataContext: TabViewModel vm } || vm.IsSelected) return;
+            Win32.GetCursorPos(out var now);
+            if (Math.Abs(now.X - _cursorAtShow.X) < 2 && Math.Abs(now.Y - _cursorAtShow.Y) < 2) return;
 
-            double contentWidth = tabCount * cardWidth + Math.Max(0, tabCount - 1) * cardSpacing + padding * 2;
-            double height = cardHeight + padding * 2;
-
-            // Get browser window rect
-            var browserRect = GetBrowserWindowRect();
-            double targetX, targetY, targetW, targetH;
-
-            if (browserRect.HasValue)
-            {
-                targetX = browserRect.Value.Left;
-                targetY = browserRect.Value.Top;
-                targetW = browserRect.Value.Width;
-                targetH = browserRect.Value.Height;
-                DebugLogger.Log($"Using browser window rect: {targetX},{targetY} {targetW}x{targetH}");
-            }
-            else
-            {
-                var screen = SystemParameters.WorkArea;
-                targetX = screen.Left;
-                targetY = screen.Top;
-                targetW = screen.Width;
-                targetH = screen.Height;
-                DebugLogger.Log($"Falling back to screen: {targetW}x{targetH}");
-            }
-
-            double maxWidth = Math.Min(targetW - 40, Constants.MaxOverlayWidth);
-            double width = Math.Min(contentWidth, maxWidth);
-
-            Width = width;
-            Height = height;
-            Left = targetX + (targetW - width) / 2;
-            Top = targetY + (targetH - height) / 2 - targetH * 0.08; // Slightly above center
-        }
-
-        /// <summary>
-        /// Get the foreground browser window rectangle.
-        /// Port of getBrowserWindowFrame (main.swift:1597-1678).
-        /// Uses GetForegroundWindow + GetWindowRect (much simpler than macOS AXUIElement).
-        /// </summary>
-        private NativeMethods.RECT? GetBrowserWindowRect()
-        {
-            IntPtr hwnd = NativeMethods.GetForegroundWindow();
-            if (hwnd == IntPtr.Zero) return null;
-
-            if (NativeMethods.GetWindowRect(hwnd, out var rect))
-            {
-                if (rect.Width > 100 && rect.Height > 100)
-                    return rect;
-            }
-
-            return null;
+            UpdateSelection(vm.Index);
+            DebugLogger.Log($"Hover selected index {vm.Index}");
+            Send?.Invoke(new { action = "select_tab", tabId = vm.Id });
         }
     }
-
-    // ---- View Model ----
 
     public class TabViewModel : INotifyPropertyChanged
     {
         private bool _isSelected;
 
-        public int Id { get; set; }
-        public string Title { get; set; } = "";
-        public string FavIconUrl { get; set; } = "";
-        public BitmapImage? Thumbnail { get; set; }
-        public string Url { get; set; } = "";
+        public int Id { get; }
+        public int Index { get; }
+        public string Title { get; }
+        public BitmapImage? Thumbnail { get; }
+        public ImageSource? Favicon { get; }
+        public double CardWidth { get; }
+        public double CardHeight { get; }
 
         public bool IsSelected
         {
             get => _isSelected;
-            set { _isSelected = value; PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(IsSelected))); }
+            set
+            {
+                if (_isSelected == value) return;
+                _isSelected = value;
+                PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(IsSelected)));
+            }
         }
 
-        public TabViewModel(TabInfo tab, bool isSelected)
+        public TabViewModel(TabInfo tab, int index, bool isSelected, SwitcherLayout layout)
         {
             Id = tab.Id;
+            Index = index;
             Title = tab.Title;
-            FavIconUrl = tab.FavIconUrl;
             Thumbnail = tab.Thumbnail;
-            Url = tab.Url;
+            Favicon = ImageLoader.Load(tab.FavIconUrl, 72);
+            CardWidth = layout.CardWidth;
+            CardHeight = layout.CardHeight;
             _isSelected = isSelected;
         }
 
         public event PropertyChangedEventHandler? PropertyChanged;
     }
-
 }
