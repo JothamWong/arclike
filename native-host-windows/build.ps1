@@ -1,4 +1,4 @@
-# build.ps1 — Build, publish, and package Tab Switcher for Windows
+# build.ps1 — Build, publish, and package Arclike for Windows
 # Usage:
 #   .\build.ps1              # Build only
 #   .\build.ps1 -Installer   # Build + create installer
@@ -15,18 +15,18 @@ $ProjectDir = $PSScriptRoot
 $PublishDir = Join-Path $ProjectDir "dist\publish"
 $InstallerDir = Join-Path $ProjectDir "installer"
 
-Write-Host "=== Tab Switcher Windows Build ===" -ForegroundColor Cyan
+Write-Host "=== Arclike Windows Build ===" -ForegroundColor Cyan
 
 # Clean
 if ($Clean) {
     Write-Host "Cleaning..." -ForegroundColor Yellow
-    dotnet clean "$ProjectDir\TabSwitcher\TabSwitcher.csproj" -c Release
+    dotnet clean "$ProjectDir\Arclike\Arclike.csproj" -c Release
     if (Test-Path $PublishDir) { Remove-Item -Recurse -Force $PublishDir }
 }
 
 # Build + Publish
 Write-Host "Publishing..." -ForegroundColor Yellow
-dotnet publish "$ProjectDir\TabSwitcher\TabSwitcher.csproj" `
+dotnet publish "$ProjectDir\Arclike\Arclike.csproj" `
     -c Release `
     -r win-x64 `
     --self-contained `
@@ -39,9 +39,9 @@ if ($LASTEXITCODE -ne 0) {
     exit 1
 }
 
-$ExePath = Join-Path $PublishDir "TabSwitcher.exe"
+$ExePath = Join-Path $PublishDir "Arclike.exe"
 if (-not (Test-Path $ExePath)) {
-    Write-Host "ERROR: TabSwitcher.exe not found at $ExePath" -ForegroundColor Red
+    Write-Host "ERROR: Arclike.exe not found at $ExePath" -ForegroundColor Red
     exit 1
 }
 

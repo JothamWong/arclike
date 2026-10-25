@@ -14,3 +14,7 @@ dist/
 
 # Debug logs
 *.log
+
+# .NET
+native-host-windows/**/bin/
+native-host-windows/**/obj/
