@@ -8,6 +8,16 @@ Status: in progress, not yet run on Windows. It builds on macOS with the .NET 8 
 dotnet build native-host-windows/Arclike/Arclike.csproj -p:EnableWindowsTargeting=true
 ```
 
+Unit tests for the platform-neutral parts run on macOS too:
+
+```bash
+dotnet test native-host-windows/Arclike.Tests
+```
+
+## Test on a headless Windows box
+
+`test/remote-test.sh` copies the working tree to the box over SSH, installs it, runs the protocol test and the scenarios in `test/scenarios`, and copies screenshots and logs back to `test/results/`. The one-time box setup is in [docs/windows-port.md](../docs/windows-port.md), section 8, then run `test/Register-InteractiveRunner.ps1` on the box once.
+
 ## Build and install on Windows
 
 Needs the .NET 8 SDK, Windows 10 or 11 (x64) and Chrome.

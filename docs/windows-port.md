@@ -1,6 +1,6 @@
 # Arclike on Windows: port plan
 
-Status: research and plan only, written 2026-10-25. No Windows code changed. Section 10 lists what was and was not verified.
+Status, 2026-10-25: the code for phases 1 to 3 and the test tools of phase 0 (section 9) is written. It builds on macOS. It has not run on Windows yet. Section 10 lists what was and was not verified.
 
 ## 1. Summary
 
@@ -431,10 +431,11 @@ Verified on 2026-10-25, on macOS:
 - Every statement about the upstream C# code in sections 2, 3.3 and 3.4 comes from reading that code. Every statement about the macOS app comes from `native-host/Sources/arclike/main.swift` and `extension/` at `0af95a3`.
 - Chrome native messaging rules in section 5 come from Chrome's documentation. The `cmd.exe` launch comes from Chromium sources and the `NativeHostsExecutablesLaunchDirectly` policy notes.
 - The `--load-extension` removal (Chrome 137) and the remote debugging change (Chrome 136) come from Chromium's announcements. `Extensions.loadUnpacked` exists in the current DevTools Protocol definition, with parameters `path` and `enableInIncognito`.
+- The build. With the .NET 8 SDK (8.0.426, installed user-local in `~/.dotnet8`), `dotnet build native-host-windows/Arclike.sln -p:EnableWindowsTargeting=true` builds the app, the probe and the tests with 0 warnings. With only SDK 3.1.300 it fails at restore ("Invalid target framework 'unsupported'").
+- `dotnet test native-host-windows/Arclike.Tests` passes 17 tests on macOS (switcher layout, command bar row parsing, highlighting, tips, glyphs).
 
 Not verified:
 
-- The build. This Mac has only the .NET Core 3.1.300 SDK. `dotnet build TabSwitcher/TabSwitcher.csproj -p:EnableWindowsTargeting=true` fails at restore with "Invalid target framework 'unsupported'". SDK 3.1 does not know `net8.0-windows`. A .NET 8 SDK on the Mac or on the Windows box can check the build. Upstream's last commits fix build errors, so someone probably built it. No CI result proves that.
 - Anything that runs on Windows. That includes the hook, the focus steps in 4.3, WPF in session 0 and the scheduled-task runner. It also includes capture of layered windows, `SendInput` into Chrome and UI Automation of Chrome.
 - The Chrome for Testing registry key, the exact flags Puppeteer needs for `installExtension`, and Artifact Signing prices and eligibility.
 - Why upstream reverted the port.
