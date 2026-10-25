@@ -511,3 +511,29 @@ test('New Tab Group… names the group after the typed text', async () => {
   await h.call(`commandBarChoose({ text: "" })`);
   assert.deepStrictEqual(plain(h.ran), [['tabs.group', { tabIds: 10 }]]);
 });
+
+test('a tab closed a moment ago outranks open tabs of the same site, and one closed hours ago does not', async () => {
+  const now = Date.now() / 1000;
+  const open = [10, 11, 12, 13, 14, 15, 16, 17].map(id =>
+    tab(id, { active: id === 10, url: 'https://github.com/someone/repo' + id, title: 'GitHub - someone/repo' + id }));
+  const closed = (age) => [{ lastModified: now - age, tab: { sessionId: 's1', url: 'https://github.com/me/arclike', title: 'GitHub - me/arclike' } }];
+  let h = load({ windows: [win(1, open, true)], closed: closed(30) });
+  await h.call(`commandBarOpen("new_tab")`);
+  let results = await query(h, 'github');
+  assert.deepStrictEqual([results[0].kind, results[0].url], ['closed', 'https://github.com/me/arclike']);
+  assert.strictEqual(h.lastSent('command_bar_results').autocomplete, 'github.com/');
+
+  h = load({ windows: [win(1, open, true)], closed: closed(3 * 3600) });
+  await h.call(`commandBarOpen("new_tab")`);
+  results = await query(h, 'github');
+  assert.strictEqual(results[0].kind, 'tab');
+});
+
+test('Site Settings opens the settings page of the tab\'s site', async () => {
+  const h = browser();
+  await h.call(`commandBarOpen("new_tab")`);
+  assert.strictEqual((await query(h, 'site sett'))[0].command, 'site-settings');
+  await h.call(`commandBarChoose({ item: { kind: "command", command: "site-settings" }, text: "" })`);
+  assert.deepStrictEqual(plain(h.created), [{ windowId: 1, openerTabId: 10,
+    url: 'chrome://settings/content/siteDetails?site=https%3A%2F%2Fnews.ycombinator.com' }]);
+});

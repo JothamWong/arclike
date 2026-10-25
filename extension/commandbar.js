@@ -190,7 +190,15 @@ var commandBarFuzzyScore = function(query, item, title, url) {
 // opened thousands of times does not bury everything else. The most a page can get stays below
 // an open tab's bonus, so an open tab wins a tie.
 var COMMAND_BAR_TAB_BONUS = 45;
-var COMMAND_BAR_CLOSED_BONUS = 35;
+
+// A tab closed a moment ago is what you are most likely after, so it starts above an open tab and
+// drops below one within the hour, halving its lead every 15 minutes.
+var COMMAND_BAR_CLOSED_HALF_LIFE_MINUTES = 15;
+
+var commandBarClosedBonus = function(tab) {
+	var ageMinutes = Math.max(0, (Date.now() / 1000 - (tab.lastModified || 0)) / 60);
+	return 30 + 25 * Math.pow(0.5, ageMinutes / COMMAND_BAR_CLOSED_HALF_LIFE_MINUTES);
+};
 var COMMAND_BAR_BOOKMARK_BONUS = 25;
 var COMMAND_BAR_RECENCY_HALF_LIFE_HOURS = 24;
 
@@ -226,7 +234,7 @@ var commandBarSiteRow = function(url) {
 // when the first row is that site, so Enter goes where the field says.
 var commandBarAutocomplete = function(query, lead) {
 	var text = query.trim();
-	if (!lead || !lead.url || (lead.kind !== "url" && lead.kind !== "tab") || /[\s\/]/.test(text)) {
+	if (!lead || !lead.url || ["url", "tab", "closed"].indexOf(lead.kind) === -1 || /[\s\/]/.test(text)) {
 		return "";
 	}
 	var host = commandBarHost(lead.url);
@@ -251,6 +259,7 @@ var COMMAND_BAR_COMMANDS = [
 	{ command: "reload-tab", title: "Reload Tab", hint: "⌘R", symbol: "arrow.clockwise", tab: true },
 	{ command: "move-tab-to-new-window", title: "Move Tab to New Window", symbol: "macwindow.badge.plus", tab: true },
 	{ command: "copy-url", title: "Copy URL", hint: "⇧⌘C", symbol: "link", tab: true },
+	{ command: "site-settings", title: "Site Settings", symbol: "slider.horizontal.3", tab: true },
 	{ command: "split-view", title: "Split View with…", symbol: "rectangle.split.2x1", tab: true, when: "canSplit",
 		pick: "split", placeholder: "Split View with a tab, an address or a search" },
 	{ command: "exit-split-view", title: "Exit Split View", symbol: "rectangle", tab: true, when: "split" },
@@ -364,7 +373,7 @@ var commandBarRank = function(query, sources) {
 			add("tab", tab, tab.title, tab.url, COMMAND_BAR_TAB_BONUS, { tabId: tab.id });
 		});
 		(sources.closed || []).forEach(function(tab) {
-			add("closed", tab, tab.title, tab.url, COMMAND_BAR_CLOSED_BONUS, { sessionId: tab.sessionId });
+			add("closed", tab, tab.title, tab.url, commandBarClosedBonus(tab), { sessionId: tab.sessionId });
 		});
 		(sources.bookmarks || []).forEach(function(bookmark) {
 			add("bookmark", bookmark, bookmark.title, bookmark.url, COMMAND_BAR_BOOKMARK_BONUS);
@@ -400,8 +409,10 @@ var commandBarRank = function(query, sources) {
 			results.push(commands.shift());
 		}
 		if (strong) {
-			// A site name leads with the site itself, unless a tab has a page of it open.
-			var site = best.kind !== "tab" && commandBarHost(best.url).indexOf(text.toLowerCase()) === 0 ?
+			// A site name leads with the site itself, unless a tab, open or just closed, has a page
+			// of it.
+			var site = best.kind !== "tab" && best.kind !== "closed" &&
+				commandBarHost(best.url).indexOf(text.toLowerCase()) === 0 ?
 				commandBarSiteRow(best.url) : best;
 			results.push(site);
 			var siteKey = commandBarUrlKey(site.url);
@@ -506,7 +517,9 @@ var commandBarClosedTabs = async function() {
 		var sessions = await chrome.sessions.getRecentlyClosed({ maxResults: chrome.sessions.MAX_SESSION_RESULTS || 25 });
 		return sessions.filter(function(session) {
 			return session.tab && session.tab.url && session.tab.sessionId;
-		}).map(function(session) { return session.tab; });
+		}).map(function(session) {
+			return Object.assign({ lastModified: session.lastModified }, session.tab);
+		});
 	} catch (e) {
 		log("CommandBar::Could not read recently closed tabs: " + e.message);
 		return [];
@@ -715,6 +728,13 @@ var commandBarRunCommand = async function(command, target) {
 		// The app owns the clipboard and shows the same toast as Cmd+Shift+C.
 		var tab = await chrome.tabs.get(tabId);
 		sendToNativeHost({ action: "url_copied", url: tab.url, title: tab.title || "" });
+		break;
+	case "site-settings":
+		// The page where Chrome keeps this site's permissions, such as automatic picture-in-picture.
+		var site = await chrome.tabs.get(tabId);
+		var origin = /^https?:\/\/[^\/?#]+/i.exec(site.url || "");
+		await chrome.tabs.create({ windowId: target.windowId, openerTabId: tabId, url: origin ?
+			"chrome://settings/content/siteDetails?site=" + encodeURIComponent(origin[0]) : "chrome://settings/content" });
 		break;
 	case "exit-split-view":
 		await chrome.tabs.unsplit(target.splitViewId);
