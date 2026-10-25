@@ -10,9 +10,9 @@ set -euo pipefail
 # EXTENSION_ID defaults to the ID Chrome gives an unpacked extension loaded from this
 # checkout's root folder. It is added to the native messaging host's allowed origins.
 #
-# SIGNING_IDENTITY picks the code signing identity. Signing with the same identity on every
-# build keeps the Accessibility permission across rebuilds. "-" signs ad hoc, which needs the
-# permission granted again after each install.
+# SIGNING_IDENTITY picks the code signing identity. The default "-" signs ad hoc, so macOS
+# sees each build as a new app and the Accessibility permission must be granted again after
+# every install. A real code signing certificate keeps the permission across rebuilds.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
@@ -20,7 +20,7 @@ APP_NAME="Tab Switcher.app"
 INSTALLED_APP="/Applications/$APP_NAME"
 STAGED_APP="$PROJECT_DIR/dist/$APP_NAME"
 BINARY_NAME="tab-switcher"
-SIGNING_IDENTITY="${SIGNING_IDENTITY:-gdb-cert}"
+SIGNING_IDENTITY="${SIGNING_IDENTITY:--}"
 CONFIG="$HOME/Library/Application Support/TabSwitcher/browser_config.json"
 HOST_MANIFEST="$HOME/Library/Application Support/Google/Chrome/NativeMessagingHosts/com.tabswitcher.native.json"
 
