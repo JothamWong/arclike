@@ -187,6 +187,10 @@ function arcShowChecklist(extensions) {
   arcSection("Finish switching", [
     ["Reopen tabs on startup", "", "chrome://settings/onStartup", "Choose \"Continue where you left off\""],
     ["Bookmarks bar on all tabs", "optional", "chrome://settings/appearance", "Turn on \"Show bookmarks bar\""],
+    // Chrome's default only asks, and auto PiP then waits for the site's media engagement
+    // score. An explicit Allow per site skips that, and no extension API can set it.
+    ["Auto picture-in-picture", "video sites", "chrome://settings/content/autoPictureInPicture",
+      "Under \"Allowed to enter picture-in-picture automatically\", add youtube.com and netflix.com"],
   ].concat((extensions || []).map(function(ext) {
     return ["Install " + ext.name, "from Arc", "https://chromewebstore.google.com/detail/" + ext.id];
   })));
