@@ -3,6 +3,8 @@
  * Provides macOS-style Cmd+Tab switching for Chrome tabs
  */
 
+importScripts("commandbar.js");
+
 // Version checking
 var EXTENSION_VERSION = chrome.runtime.getManifest().version;
 var VERSION_CHECK_URL = "https://tabswitcher.app/version.json";
@@ -627,7 +629,8 @@ var connectNativeHost = function() {
 			if (message.action === "ready") {
 				log("Native host is ready, registering browser: " + browserBundleId);
 				// Register this extension with its browser's bundle ID
-				sendToNativeHost({ action: "register", bundleId: browserBundleId, extensionVersion: EXTENSION_VERSION });
+				sendToNativeHost({ action: "register", bundleId: browserBundleId, extensionVersion: EXTENSION_VERSION,
+					features: ["command_bar"] });
 			} else if (message.action === "registered") {
 				log("Successfully registered with native host for browser: " + message.bundleId);
 				if (message.shortcuts) {
@@ -654,6 +657,14 @@ var connectNativeHost = function() {
 				queueNativeSwitch(function() { return handleNativeSelectTab(message.tabId); });
 			} else if (message.action === "copy_url") {
 				handleCopyUrl();
+			} else if (message.action === "command_bar_open") {
+				commandBarOpen(message.mode);
+			} else if (message.action === "command_bar_query") {
+				commandBarQuery(message);
+			} else if (message.action === "command_bar_choose") {
+				commandBarChoose(message);
+			} else if (message.action === "command_bar_closed") {
+				commandBarClosed();
 			} else if (message.action === "error_no_accessibility") {
 				log("Native host error: No accessibility permissions");
 				nativeHostConnected = false;

@@ -1905,6 +1905,432 @@ class TabSwitcherWindow: NSPanel {
     override var canBecomeMain: Bool { false }
 }
 
+// MARK: - Command Bar
+
+/// One suggestion in the command bar. `payload` is the extension's own description of the row
+/// and goes back unchanged when the row is chosen.
+struct CommandBarItem: Identifiable {
+    let id: Int
+    let kind: String
+    let title: String
+    let detail: String
+    let hint: String
+    let favicon: NSImage?
+    let payload: [String: Any]
+}
+
+func parseCommandBarItems(_ results: [[String: Any]]) -> [CommandBarItem] {
+    var items: [CommandBarItem] = []
+    for var dict in results {
+        guard let kind = dict["kind"] as? String else { continue }
+        var favicon: NSImage? = nil
+        if let dataUrl = dict.removeValue(forKey: "favicon") as? String,
+           let comma = dataUrl.firstIndex(of: ","),
+           let data = Data(base64Encoded: String(dataUrl[dataUrl.index(after: comma)...])) {
+            favicon = downsampleImage(data, maxPixelSize: 64)
+        }
+        items.append(CommandBarItem(
+            id: items.count,
+            kind: kind,
+            title: dict["title"] as? String ?? "",
+            detail: dict["detail"] as? String ?? "",
+            hint: dict["hint"] as? String ?? "",
+            favicon: favicon,
+            payload: dict
+        ))
+    }
+    return items
+}
+
+enum CommandBarLayout {
+    static let maxWidth: CGFloat = 720
+    static let minWidth: CGFloat = 360
+    static let fieldHeight: CGFloat = 62
+    static let rowHeight: CGFloat = 46
+    static let rowSpacing: CGFloat = 2
+    static let listPadding: CGFloat = 8
+    static let cornerRadius: CGFloat = 16
+
+    static func height(rows: Int) -> CGFloat {
+        guard rows > 0 else { return fieldHeight }
+        return fieldHeight + 1 + listPadding * 2 + CGFloat(rows) * rowHeight + CGFloat(rows - 1) * rowSpacing
+    }
+}
+
+/// The command bar on screen. The extension supplies the rows and opens the choice; this side
+/// owns the panel, the text and the selection.
+final class CommandBarState: NSObject, ObservableObject, NSTextFieldDelegate, NSWindowDelegate {
+    static let shared = CommandBarState()
+
+    @Published var items: [CommandBarItem] = []
+    @Published var selectedIndex: Int?
+    /// The text the rows were found for, whose words are shown in bold in the titles.
+    @Published var itemsQuery = ""
+
+    private(set) var isVisible = false
+    /// What was typed. The field can show more: an inline completion after it, selected.
+    private var typed = ""
+    /// Set when the last edit added text at the end. Only then is a completion shown, so
+    /// deleting a completion does not bring it straight back.
+    private var completing = false
+    private var querySeq = 0
+    private var panel: CommandBarPanel?
+    /// Hover is ignored until the cursor moves, so a row that appears under a resting cursor is
+    /// not selected by accident.
+    private var mouseLocationAtShow: NSPoint = .zero
+
+    /// Show the bar over the focused browser window, holding `text` (selected, so typing
+    /// replaces it). Called again while open, it starts over with the new text.
+    func show(text: String) {
+        if panel == nil {
+            let newPanel = CommandBarPanel()
+            newPanel.delegate = self
+            newPanel.field.delegate = self
+            panel = newPanel
+        }
+        guard let panel = panel else { return }
+
+        let target = getBrowserWindowFrame() ?? (NSScreen.main ?? NSScreen.screens.first)?.visibleFrame ?? .zero
+        let width = min(CommandBarLayout.maxWidth, max(CommandBarLayout.minWidth, target.width - 48))
+        let height = CommandBarLayout.height(rows: 0)
+        // A little above the middle of the window, like Arc and Zen.
+        let top = target.maxY - max(70, target.height * 0.22)
+        var frame = NSRect(x: target.midX - width / 2, y: top - height, width: width, height: height)
+        if let bounds = (screenContaining(target) ?? NSScreen.main)?.visibleFrame {
+            frame.origin.x = clampOrigin(frame.origin.x, length: width, within: bounds.minX...bounds.maxX)
+            frame.origin.y = clampOrigin(frame.origin.y, length: height, within: bounds.minY...bounds.maxY)
+        }
+
+        typed = text
+        completing = false
+        items = []
+        itemsQuery = ""
+        selectedIndex = nil
+        mouseLocationAtShow = NSEvent.mouseLocation
+        isVisible = true
+
+        panel.setFrame(frame, display: false)
+        panel.field.stringValue = text
+        panel.makeKeyAndOrderFront(nil)
+        panel.makeFirstResponder(panel.field)
+        panel.field.currentEditor()?.selectAll(nil)
+        sendQuery()
+    }
+
+    /// Rows for query `seq`. A `refresh` carries the same rows again with their favicons.
+    func receiveResults(seq: Int, items: [CommandBarItem], autocomplete: String, refresh: Bool) {
+        guard isVisible, seq == querySeq else { return }
+        if refresh {
+            if items.count == self.items.count {
+                self.items = items
+            }
+            return
+        }
+        self.items = items
+        itemsQuery = typed
+        selectedIndex = typed.trimmingCharacters(in: .whitespaces).isEmpty || items.isEmpty ? nil : 0
+        if completing {
+            showCompletion(autocomplete)
+        }
+        resizePanel()
+    }
+
+    /// Hide the bar without opening anything.
+    func dismiss() {
+        guard isVisible else { return }
+        hidePanel()
+        sendMessage(["action": "command_bar_closed"])
+    }
+
+    /// Open a row, or the text in the field when no row is selected, and hide the bar.
+    func choose(index: Int?) {
+        guard isVisible else { return }
+        var message: [String: Any] = ["action": "command_bar_choose", "text": panel?.field.stringValue ?? typed]
+        if let index = index, items.indices.contains(index) {
+            message["item"] = items[index].payload
+        }
+        // Hide first, so the browser window has the keyboard back before the tab opens.
+        hidePanel()
+        sendMessage(message)
+    }
+
+    func hoverSelect(index: Int) {
+        guard isVisible, items.indices.contains(index), index != selectedIndex else { return }
+        let location = NSEvent.mouseLocation
+        if abs(location.x - mouseLocationAtShow.x) < 2 && abs(location.y - mouseLocationAtShow.y) < 2 {
+            return
+        }
+        selectedIndex = index
+    }
+
+    /// Put `completion` in the field after what was typed, with the added part selected so the
+    /// next keystroke replaces it. Skipped if the field has moved on since the query was sent.
+    private func showCompletion(_ completion: String) {
+        guard let field = panel?.field,
+              let editor = field.currentEditor() as? NSTextView,
+              field.stringValue == typed,
+              editor.selectedRange() == NSRange(location: (typed as NSString).length, length: 0),
+              completion.count > typed.count,
+              completion.lowercased().hasPrefix(typed.lowercased()) else { return }
+        let shown = typed + completion.dropFirst(typed.count)
+        field.stringValue = shown
+        let start = (typed as NSString).length
+        editor.setSelectedRange(NSRange(location: start, length: (shown as NSString).length - start))
+    }
+
+    private func move(_ delta: Int) {
+        guard !items.isEmpty else { return }
+        if let current = selectedIndex {
+            selectedIndex = (current + delta + items.count) % items.count
+        } else {
+            selectedIndex = delta > 0 ? 0 : items.count - 1
+        }
+    }
+
+    private func sendQuery() {
+        querySeq += 1
+        sendMessage(["action": "command_bar_query", "query": typed, "seq": querySeq])
+    }
+
+    private func hidePanel() {
+        isVisible = false
+        panel?.orderOut(nil)
+        items = []
+        selectedIndex = nil
+    }
+
+    /// Grow or shrink the panel to its rows, keeping its top edge where it is.
+    private func resizePanel() {
+        guard let panel = panel else { return }
+        var frame = panel.frame
+        let height = CommandBarLayout.height(rows: items.count)
+        frame.origin.y = frame.maxY - height
+        frame.size.height = height
+        panel.setFrame(frame, display: true)
+        panel.invalidateShadow()
+    }
+
+    // MARK: NSTextFieldDelegate
+
+    func controlTextDidChange(_ obj: Notification) {
+        guard let field = obj.object as? NSTextField else { return }
+        let value = field.stringValue
+        completing = value.count > typed.count && value.hasPrefix(typed)
+        typed = value
+        sendQuery()
+    }
+
+    func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+        switch commandSelector {
+        case #selector(NSResponder.moveDown(_:)), #selector(NSResponder.insertTab(_:)):
+            move(1)
+        case #selector(NSResponder.moveUp(_:)), #selector(NSResponder.insertBacktab(_:)):
+            move(-1)
+        case #selector(NSResponder.insertNewline(_:)):
+            choose(index: selectedIndex)
+        case #selector(NSResponder.cancelOperation(_:)):
+            dismiss()
+        default:
+            return false
+        }
+        return true
+    }
+
+    // MARK: NSWindowDelegate
+
+    /// A click outside the bar, or a switch to another app, closes it.
+    func windowDidResignKey(_ notification: Notification) {
+        dismiss()
+    }
+}
+
+/// The search field. The app has no Edit menu while it runs as a helper, so the editing
+/// shortcuts are handled here.
+final class CommandBarTextField: NSTextField {
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command,
+           let editor = currentEditor() {
+            switch event.charactersIgnoringModifiers {
+            case "a": editor.selectAll(nil); return true
+            case "c": editor.copy(nil); return true
+            case "v": editor.paste(nil); return true
+            case "x": editor.cut(nil); return true
+            default: break
+            }
+        }
+        return super.performKeyEquivalent(with: event)
+    }
+}
+
+struct CommandBarFieldView: NSViewRepresentable {
+    let field: NSTextField
+
+    func makeNSView(context: Context) -> NSTextField { field }
+    func updateNSView(_ nsView: NSTextField, context: Context) {}
+}
+
+/// `text` with every place a word of `query` occurs set in bold, as Zen and Arc show matches.
+func commandBarHighlighted(_ text: String, query: String) -> AttributedString {
+    var attributed = AttributedString(text)
+    for word in query.lowercased().split(separator: " ") where !word.isEmpty {
+        var searchStart = attributed.startIndex
+        while searchStart < attributed.endIndex,
+              let range = attributed[searchStart...].range(of: String(word), options: .caseInsensitive) {
+            attributed[range].font = .system(size: 15, weight: .semibold)
+            attributed[range].foregroundColor = .white
+            searchStart = range.upperBound
+        }
+    }
+    return attributed
+}
+
+struct CommandBarRow: View {
+    let item: CommandBarItem
+    let query: String
+    let isSelected: Bool
+
+    var body: some View {
+        HStack(spacing: 12) {
+            icon
+            HStack(spacing: 0) {
+                Text(commandBarHighlighted(item.title, query: item.kind == "search" ? "" : query))
+                    .foregroundColor(.white.opacity(isSelected ? 1 : 0.85))
+                    .layoutPriority(1)
+                if !item.detail.isEmpty {
+                    Text("  —  " + item.detail)
+                        .foregroundColor(.white.opacity(isSelected ? 0.8 : 0.5))
+                }
+            }
+            .font(.system(size: 15))
+            .lineLimit(1)
+            .truncationMode(.tail)
+            Spacer(minLength: 8)
+            if !item.hint.isEmpty {
+                HStack(spacing: 8) {
+                    Text(item.hint)
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundColor(.white.opacity(isSelected ? 0.9 : 0.55))
+                    if item.kind == "tab" {
+                        Image(systemName: "arrow.right")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundColor(.white.opacity(0.85))
+                            .frame(width: 22, height: 22)
+                            .background(RoundedRectangle(cornerRadius: 5).fill(Color.white.opacity(0.18)))
+                    }
+                }
+            }
+        }
+        .padding(.horizontal, 12)
+        .frame(height: CommandBarLayout.rowHeight)
+        .background(
+            RoundedRectangle(cornerRadius: 10)
+                .fill(isSelected ? Color(nsColor: .controlAccentColor).opacity(0.38) : Color.clear)
+        )
+    }
+
+    private var icon: some View {
+        Group {
+            if let favicon = item.favicon {
+                Image(nsImage: favicon)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+            } else {
+                Image(systemName: item.kind == "search" ? "magnifyingglass" : "globe")
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .foregroundColor(isSelected ? .black.opacity(0.7) : .white.opacity(0.75))
+            }
+        }
+        .frame(width: 16, height: 16)
+        .frame(width: 28, height: 28)
+        .background(RoundedRectangle(cornerRadius: 7).fill(Color.white.opacity(isSelected ? 0.9 : 0.08)))
+    }
+}
+
+struct CommandBarView: View {
+    @ObservedObject var state = CommandBarState.shared
+    let field: NSTextField
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 14) {
+                Image(systemName: "magnifyingglass")
+                    .font(.system(size: 17, weight: .regular))
+                    .foregroundColor(.white.opacity(0.45))
+                CommandBarFieldView(field: field)
+            }
+            .padding(.horizontal, 22)
+            .frame(height: CommandBarLayout.fieldHeight)
+
+            if !state.items.isEmpty {
+                Rectangle()
+                    .fill(Color.white.opacity(0.08))
+                    .frame(height: 1)
+                    .padding(.horizontal, 12)
+                VStack(spacing: CommandBarLayout.rowSpacing) {
+                    ForEach(state.items) { item in
+                        CommandBarRow(item: item, query: state.itemsQuery, isSelected: state.selectedIndex == item.id)
+                            .contentShape(Rectangle())
+                            .background(HoverTrackingView { state.hoverSelect(index: item.id) })
+                            .onTapGesture { state.choose(index: item.id) }
+                    }
+                }
+                .padding(CommandBarLayout.listPadding)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .background(Color(white: 0.11))
+        .clipShape(RoundedRectangle(cornerRadius: CommandBarLayout.cornerRadius))
+        .overlay(
+            RoundedRectangle(cornerRadius: CommandBarLayout.cornerRadius)
+                .stroke(Color.white.opacity(0.12), lineWidth: 1)
+        )
+    }
+}
+
+/// A panel that takes the keyboard without activating the app, so the browser stays the
+/// frontmost app while the bar is typed into, the way Spotlight works.
+final class CommandBarPanel: NSPanel {
+    let field = CommandBarTextField()
+
+    init() {
+        super.init(
+            contentRect: NSRect(x: 0, y: 0, width: CommandBarLayout.maxWidth, height: CommandBarLayout.fieldHeight),
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+        level = .floating
+        isOpaque = false
+        backgroundColor = .clear
+        hasShadow = true
+        hidesOnDeactivate = false
+        becomesKeyOnlyIfNeeded = false
+        collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        acceptsMouseMovedEvents = true
+        appearance = NSAppearance(named: .darkAqua)
+
+        let font = NSFont.systemFont(ofSize: 18)
+        field.font = font
+        field.textColor = .white
+        field.isBordered = false
+        field.drawsBackground = false
+        field.focusRingType = .none
+        field.usesSingleLineMode = true
+        field.cell?.wraps = false
+        field.cell?.isScrollable = true
+        field.placeholderAttributedString = NSAttributedString(
+            string: "Search with Google or enter address",
+            attributes: [.foregroundColor: NSColor.white.withAlphaComponent(0.4), .font: font]
+        )
+
+        contentView = NSHostingView(rootView: CommandBarView(field: field))
+    }
+
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { false }
+}
+
 // MARK: - App Delegate
 
 class AppDelegate: NSObject, NSApplicationDelegate {
@@ -2271,6 +2697,28 @@ func handleMessage(_ message: [String: Any]) {
     case "hide_switcher":
         debugLog("Hiding switcher")
         TabSwitcherState.shared.hideSwitcher()
+
+    case "show_command_bar":
+        let text = message["text"] as? String ?? ""
+        DispatchQueue.main.async {
+            CommandBarState.shared.show(text: text)
+        }
+
+    case "command_bar_results":
+        if let seq = message["seq"] as? Int, let results = message["results"] as? [[String: Any]] {
+            let items = parseCommandBarItems(results)
+            let autocomplete = message["autocomplete"] as? String ?? ""
+            let refresh = message["refresh"] as? Bool ?? false
+            debugLog("Command bar results for query \(seq): \(items.count) rows\(refresh ? " (favicons)" : "")")
+            DispatchQueue.main.async {
+                CommandBarState.shared.receiveResults(seq: seq, items: items, autocomplete: autocomplete, refresh: refresh)
+            }
+        }
+
+    case "log":
+        if let text = message["message"] as? String {
+            debugLog("Extension: \(text)")
+        }
         
     case "register":
         // Extension tells us which browser it's running in
@@ -2301,6 +2749,12 @@ func handleMessage(_ message: [String: Any]) {
                 "copyUrl": BrowserConfigManager.shared.shortcuts.copyUrl.displayString
             ]
             sendMessage(["action": "registered", "bundleId": ownerBrowserBundleId ?? bundleId, "shortcuts": shortcuts])
+            if let features = message["features"] as? [String], features.contains("command_bar") {
+                DispatchQueue.main.async {
+                    extensionSupportsCommandBar = true
+                    announceCommandBar()
+                }
+            }
         }
         
     case "ping":
@@ -2442,6 +2896,10 @@ var ownerBrowserProcessId: pid_t? = nil  // The PID of the specific browser proc
 var myProcessId: pid_t = getpid()  // This native host's PID for identification
 var isEventTapLeader = false  // Whether this instance owns the event tap
 var allowConfigUI = false  // Allow showing config UI even if not direct launch
+var extensionSupportsCommandBar = false  // Our extension can answer the command bar
+/// Native hosts whose extension answers the command bar, by browser. Every instance keeps this,
+/// since any of them may become the event tap leader. Only touched on the main thread.
+var commandBarHosts: [String: Set<pid_t>] = [:]
 
 // Detect which browser launched this native host by checking parent process
 // Returns (bundleId, processId) tuple
@@ -2594,6 +3052,9 @@ let leaderResignedNotificationName = "com.tabswitcher.leaderResigned"
 let showConfigNotificationName = "com.tabswitcher.showConfig"
 let copyUrlNotificationName = "com.tabswitcher.copyUrl"
 let shortcutsChangedNotificationName = "com.tabswitcher.shortcutsChanged"
+let commandBarNotificationName = "com.tabswitcher.commandBar"
+let commandBarReadyNotificationName = "com.tabswitcher.commandBarReady"
+let commandBarRollCallNotificationName = "com.tabswitcher.commandBarRollCall"
 
 // Setup listener for distributed notifications (for non-leader hosts)
 func setupNotificationListener() {
@@ -2695,6 +3156,31 @@ func setupNotificationListener() {
         sendMessage(["action": "copy_url"])
     }
 
+    // Cmd+T or Cmd+L in our browser: ask the extension, which opens the bar if its profile
+    // owns the focused window.
+    center.addObserver(forName: NSNotification.Name(commandBarNotificationName), object: nil, queue: .main) { notification in
+        guard let userInfo = notification.userInfo,
+              let mode = userInfo["mode"] as? String,
+              let targetBrowser = userInfo["targetBrowser"] as? String,
+              extensionSupportsCommandBar,
+              ownerBrowserBundleId == targetBrowser else { return }
+        debugLog("Received command-bar notification, mode=\(mode)")
+        sendMessage(["action": "command_bar_open", "mode": mode])
+    }
+
+    center.addObserver(forName: NSNotification.Name(commandBarReadyNotificationName), object: nil, queue: .main) { notification in
+        guard let userInfo = notification.userInfo,
+              let browser = userInfo["browser"] as? String,
+              let pid = userInfo["pid"] as? Int else { return }
+        commandBarHosts[browser, default: []].insert(pid_t(pid))
+    }
+
+    center.addObserver(forName: NSNotification.Name(commandBarRollCallNotificationName), object: nil, queue: .main) { _ in
+        if extensionSupportsCommandBar {
+            announceCommandBar()
+        }
+    }
+
     // Listen for shortcut config changes from other instances
     center.addObserver(forName: NSNotification.Name(shortcutsChangedNotificationName), object: nil, queue: .main) { _ in
         debugLog("Received shortcuts-changed notification, reloading")
@@ -2733,6 +3219,14 @@ func setupNotificationListener() {
     }
 
     debugLog("Notification listener setup complete (PID \(myProcessId), browser=\(ownerBrowserBundleId ?? "unknown"))")
+
+    // Learn which browsers already have a command bar, in case this instance becomes the leader.
+    DistributedNotificationCenter.default().postNotificationName(
+        NSNotification.Name(commandBarRollCallNotificationName),
+        object: nil,
+        userInfo: nil,
+        deliverImmediately: true
+    )
     
     // Periodic check for dead leader (backup in case leader crashes without notification)
     // Only do this for non-leaders that were launched via native messaging
@@ -2850,6 +3344,37 @@ func postCopyUrlNotification() {
     debugLog("Posted copy-url notification for browser: \(frontmostBrowser)")
 }
 
+/// Tell every instance that our browser's extension answers the command bar, so the leader
+/// starts taking Cmd+T and Cmd+L from that browser.
+func announceCommandBar() {
+    guard let browser = ownerBrowserBundleId else { return }
+    DistributedNotificationCenter.default().postNotificationName(
+        NSNotification.Name(commandBarReadyNotificationName),
+        object: nil,
+        userInfo: ["browser": browser, "pid": Int(myProcessId)],
+        deliverImmediately: true
+    )
+}
+
+/// Whether a running native host for `browser` can answer the command bar. A browser whose
+/// extension cannot keeps its own Cmd+T and Cmd+L.
+func commandBarAvailable(for browser: String) -> Bool {
+    guard let pids = commandBarHosts[browser] else { return false }
+    let alive = pids.filter { kill($0, 0) == 0 }
+    commandBarHosts[browser] = alive
+    return !alive.isEmpty
+}
+
+func postCommandBarNotification(mode: String, browser: String) {
+    DistributedNotificationCenter.default().postNotificationName(
+        NSNotification.Name(commandBarNotificationName),
+        object: nil,
+        userInfo: ["mode": mode, "targetBrowser": browser],
+        deliverImmediately: true
+    )
+    debugLog("Posted command-bar notification for browser: \(browser), mode=\(mode)")
+}
+
 // MARK: - Event Tap Callback
 
 func eventTapCallback(
@@ -2914,6 +3439,16 @@ func eventTapCallback(
             postCtrlCancelNotification()
             switchInProgress = false
             tabPressCount = 0
+            return nil
+        }
+
+        // Cmd+T and Cmd+L open the command bar instead of the browser's new tab and address
+        // bar: Cmd+T to open the choice in a new tab, Cmd+L to open it in this one.
+        let isCommandBarKey = keyCode == Int64(kVK_ANSI_T) || keyCode == Int64(kVK_ANSI_L)
+        if isCommandBarKey && currentMods == CGEventFlags.maskCommand.rawValue && commandBarAvailable(for: bundleId) {
+            if event.getIntegerValueField(.keyboardEventAutorepeat) == 0 {
+                postCommandBarNotification(mode: keyCode == Int64(kVK_ANSI_T) ? "new_tab" : "current_tab", browser: bundleId)
+            }
             return nil
         }
 

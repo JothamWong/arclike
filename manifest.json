@@ -8,7 +8,12 @@
     "tabs",
     "nativeMessaging",
     "activeTab",
-    "storage"
+    "storage",
+    "history",
+    "bookmarks",
+    "topSites",
+    "search",
+    "favicon"
   ],
   "host_permissions": [
     "<all_urls>"

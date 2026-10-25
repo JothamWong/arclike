@@ -16,6 +16,8 @@ function load(opts = {}) {
   const sent = [];               // messages sent to the native host
   const activated = [];          // chrome.tabs.update calls
   const windowsFocused = [];
+  const created = [];            // chrome.tabs.create calls
+  const searched = [];           // chrome.search.query calls
   let state = { windows: opts.windows || [] };
   const session = {};            // what the worker saved to chrome.storage.session
 
@@ -28,12 +30,14 @@ function load(opts = {}) {
   const chrome = {
     runtime: {
       getManifest: () => ({ version: '3.7.5' }),
+      getURL: (p) => 'chrome-extension://test' + p,
       onInstalled: makeEvent(),
       onStartup: makeEvent(),
       onMessage: makeEvent(),
       lastError: null,
       connectNative: () => {
-        port = { onMessage: makeEvent(), onDisconnect: makeEvent(), postMessage: (m) => sent.push(m) };
+        // Copied as it is posted, the way the real port serialises it.
+        port = { onMessage: makeEvent(), onDisconnect: makeEvent(), postMessage: (m) => sent.push(JSON.parse(JSON.stringify(m))) };
         return port;
       },
       connect: () => ({ onDisconnect: makeEvent(), postMessage: () => {} }),
@@ -45,10 +49,11 @@ function load(opts = {}) {
       query: async (q, cb) => {
         let all = [...tabsById().values()];
         if (q.active) all = all.filter(t => t.active);
+        if (q.windowId !== undefined) all = all.filter(t => t.windowId === q.windowId);
         return all;
       },
       update: async (id, props) => { activated.push({ id, props }); return tabsById().get(id); },
-      create: () => {},
+      create: async (props) => { created.push(props); return Object.assign({ id: 999 }, props); },
       captureVisibleTab: async () => 'data:image/jpeg;base64,AAAA',
     },
     windows: {
@@ -62,8 +67,13 @@ function load(opts = {}) {
       },
       get: async (id) => state.windows.find(w => w.id === id),
       getCurrent: async () => state.windows.find(w => w.focused) || state.windows[0],
+      getLastFocused: async () => state.windows.find(w => w.focused) || state.windows[0],
       update: async (id, props) => { windowsFocused.push({ id, props }); return state.windows.find(w => w.id === id); },
     },
+    history: { search: async () => opts.history || [], onVisited: makeEvent(), onVisitRemoved: makeEvent() },
+    bookmarks: { search: async () => opts.bookmarks || [] },
+    topSites: { get: async () => opts.topSites || [] },
+    search: { query: async (q) => { searched.push(q); } },
     storage: {
       local: { get: (k, cb) => cb && cb(opts.storage || {}), set: () => {} },
       // Every tab counts as visited this session unless a test says otherwise.
@@ -79,7 +89,11 @@ function load(opts = {}) {
   const sandbox = {
     chrome,
     console: { log: opts.verbose ? console.log : () => {} },
-    fetch: async () => ({ json: async () => ({}), blob: async () => ({}) }),
+    fetch: async () => ({ json: async () => ({}), blob: async () => ({}),
+      arrayBuffer: async () => new Uint8Array([1, 2, 3]).buffer, headers: { get: () => 'image/png' } }),
+    // Scripts the worker imports run in its own context, as they do in a service worker.
+    importScripts: (...files) => files.forEach(f =>
+      vm.runInContext(fs.readFileSync(path.join(__dirname, '..', f), 'utf8'), ctx, { filename: f })),
     setTimeout, clearTimeout, setInterval: () => 0, clearInterval,
     Date, Math, JSON, Map, Set, Promise, Object, Array, String, Number, RegExp, Error, undefined,
     createImageBitmap: async () => ({ width: 2000, height: 1200, close: () => {} }),
@@ -95,7 +109,7 @@ function load(opts = {}) {
   vm.runInContext(fs.readFileSync(SRC, 'utf8'), ctx, { filename: 'mainsw.js' });
 
   const h = {
-    ctx, sandbox, chrome, sent, activated, windowsFocused, state, session,
+    ctx, sandbox, chrome, sent, activated, windowsFocused, created, searched, state, session,
     // Values cross a realm boundary, so objects arrive with the VM's own prototypes. Copy
     // them into this realm before any deepStrictEqual comparison.
     g: (name) => {
