@@ -24,6 +24,15 @@ Press **Cmd+Shift+C** to instantly copy the active tab's URL to your clipboard.
 
 Works exactly like macOS app switching (Cmd+Tab), but for your browser tabs.
 
+### Command bar
+
+Press **Cmd+T** or **Cmd+L** to open a floating search bar over the browser window, like the one in Arc and Zen. It lists open tabs, bookmarks and history that match what you type, and completes a site's name in the field as you type it. Use the arrow keys or the mouse to pick a row. Enter opens the row: it switches to an open tab, visits a site, or searches with your default search engine. Esc closes the bar.
+
+- **Cmd+T** opens the choice in a new tab. Enter in an empty bar opens a plain new tab.
+- **Cmd+L** starts with the current address and opens the choice in the current tab.
+
+The bar works on every page, including `chrome://` pages and the New Tab page, because the app draws it and not the page. The app takes Cmd+T and Cmd+L only from a browser whose extension supports the bar, so other browsers keep their own shortcuts. History from the last 90 days is matched in memory.
+
 ## Installation
 
 Tab Switcher requires two components: a browser extension and a native macOS app.
@@ -61,6 +70,8 @@ If not prompted automatically:
 | **Ctrl+Shift+Tab** | Cycle backward |
 | **Ctrl+Esc** | Close switcher without switching |
 | **Cmd+Shift+C** | Copy current tab URL |
+| **Cmd+T** | Command bar, opens in a new tab |
+| **Cmd+L** | Command bar, opens in the current tab |
 | **Alt+W** | Quick switch to last tab (no UI) |
 
 All shortcuts can be customized in the app's setup window.
@@ -100,6 +111,16 @@ The app bundle will be at `dist/Tab Switcher.app`. Code signing and notarization
 ./build.sh --sign --notarize   # build + sign + notarize
 ```
 
+### Local build of the app and the extension together
+
+`native-host/install-local.sh` builds the app, signs it ad hoc, and replaces `/Applications/Tab Switcher.app`. It also allows the extension loaded unpacked from this checkout to use the app:
+
+```bash
+./native-host/install-local.sh
+```
+
+Then reload the extension in `chrome://extensions`. An ad hoc signature is new on every build, so turn Tab Switcher off and on again in **System Settings > Privacy & Security > Accessibility** after each install. Changes to the extension only (`mainsw.js`, `commandbar.js`) need only the extension reload.
+
 ## Background resource usage
 
 Previews are downsampled to at most 440 pixels before they are cached or sent to the app, and
@@ -109,10 +130,10 @@ size, releases them when the switcher closes, and drains temporaries after every
 
 ## Tests
 
-The switcher's service-worker logic runs under Node with stubbed browser APIs:
+The service worker's switcher and command bar logic runs under Node with stubbed browser APIs:
 
 ```bash
-node --test tests/switcher.test.cjs
+node --test tests/*.test.cjs
 ```
 
 ## Project Structure
@@ -120,6 +141,7 @@ node --test tests/switcher.test.cjs
 ```
 ├── manifest.json          # Chrome extension manifest
 ├── mainsw.js              # Extension service worker
+├── commandbar.js          # Command bar suggestions and actions, loaded by the worker
 ├── popup.html/js          # Extension popup UI
 ├── icon*.png              # Extension icons
 ├── tests/                 # Node tests for the service worker's switch logic
