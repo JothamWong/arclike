@@ -292,6 +292,72 @@ var COMMAND_BAR_WHEN = {
 	grouped: function(target) { return target.groupId !== undefined && target.groupId !== -1; }
 };
 
+// Tips: one line at the foot of an empty bar, about a feature you would not find alone. Each
+// time the bar opens empty it shows the next tip. A tip goes for good when you dismiss it or
+// choose what it teaches: a command, or a kind of row. Text between backticks is what to type.
+var COMMAND_BAR_TIPS = [
+	{ id: "site-settings", text: "Type `site sett` to open this site's permissions, like automatic picture-in-picture",
+		uses: ["site-settings"] },
+	{ id: "split-view", text: "Type `split` to put this tab beside another one in Split View", when: "canSplit",
+		uses: ["split-view"] },
+	{ id: "closed-tabs", text: "Type part of a closed tab's title to bring it back", uses: ["closed"] },
+	{ id: "tab-groups", text: "Type `group` to add this tab to a tab group", uses: ["new-tab-group", "add-tab-to-group"] },
+	{ id: "tab-commands", text: "Type `pin` or `mute` to act on this tab", uses: ["pin-tab", "mute-tab"] },
+	{ id: "tab-switcher", text: "Ctrl+Tab switches between the tabs you visited recently", uses: [] }
+];
+var commandBarTips = { next: 0, retired: [] };  // kept in chrome.storage.local
+var commandBarTip = null;                       // the tip on the bar now
+// The worker can wake for a Cmd+T before the saved tips are read, and must not save over them.
+var commandBarTipsLoaded = new Promise(function(resolve) {
+	chrome.storage.local.get("commandBarTips", function(result) {
+		var saved = result && result.commandBarTips;
+		if (saved && Array.isArray(saved.retired)) {
+			commandBarTips = { next: saved.next || 0, retired: saved.retired };
+		}
+		resolve();
+	});
+});
+
+var commandBarSaveTips = function() {
+	chrome.storage.local.set({ commandBarTips: commandBarTips });
+};
+
+// The next tip that is not retired and applies here, or null when none is left.
+var commandBarNextTip = function(target) {
+	for (var i = 0; i < COMMAND_BAR_TIPS.length; i++) {
+		var index = (commandBarTips.next + i) % COMMAND_BAR_TIPS.length;
+		var tip = COMMAND_BAR_TIPS[index];
+		if (commandBarTips.retired.indexOf(tip.id) === -1 && (!tip.when || COMMAND_BAR_WHEN[tip.when](target))) {
+			commandBarTips.next = index + 1;
+			commandBarSaveTips();
+			return { id: tip.id, text: tip.text };
+		}
+	}
+	return null;
+};
+
+var commandBarRetireTip = function(id) {
+	if (commandBarTips.retired.indexOf(id) === -1) {
+		commandBarTips.retired.push(id);
+		commandBarSaveTips();
+	}
+};
+
+// A chosen row retires the tip that teaches it.
+var commandBarRetireUsedTip = function(item) {
+	var use = item && (item.kind === "command" ? item.command : item.kind);
+	COMMAND_BAR_TIPS.forEach(function(tip) {
+		if (use && tip.uses.indexOf(use) !== -1) {
+			commandBarRetireTip(tip.id);
+		}
+	});
+};
+
+var commandBarDismissTip = function(id) {
+	commandBarRetireTip(id);
+	commandBarTip = null;
+};
+
 // The commands whose name has a word starting with each word of the query, best first. `target`
 // is the bar's target: without a tab, the tab commands are left out. A command with `pick` asks
 // for a second choice in the bar, such as the tab to split with.
@@ -613,6 +679,7 @@ var commandBarAddFavicons = async function(results) {
 // several profiles open the bar opens once, over the right window.
 var commandBarOpen = async function(mode) {
 	var win = await chrome.windows.getLastFocused({ windowTypes: ["normal"] });
+	await commandBarTipsLoaded;
 	if (!win || !win.focused) {
 		log("CommandBar::No focused window in this profile - ignoring");
 		return;
@@ -627,6 +694,7 @@ var commandBarOpen = async function(mode) {
 	if (mode === "current_tab" && active && !/^chrome:\/\/newtab\/?$/.test(active.url || "")) {
 		text = active.url || "";
 	}
+	commandBarTip = text ? null : commandBarNextTip(commandBarTarget);
 	sendToNativeHost({ action: "show_command_bar", mode: mode, text: text });
 	commandBarLoadHistory();
 };
@@ -648,14 +716,17 @@ var commandBarQuery = async function(message) {
 	}
 	var picking = Boolean(commandBarTarget && commandBarTarget.pick);
 	var autocomplete = query.trim() && !picking ? commandBarAutocomplete(query, results[0]) : "";
-	sendToNativeHost({ action: "command_bar_results", seq: message.seq, results: results,
-		autocomplete: autocomplete });
+	var reply = { action: "command_bar_results", seq: message.seq, results: results, autocomplete: autocomplete };
+	// The tip shows only while nothing is typed, below the rows.
+	if (!query.trim() && !picking && commandBarTip) {
+		reply.tip = commandBarTip;
+	}
+	sendToNativeHost(reply);
 	commandBarTrace("answered \"" + query + "\" with " + results.length + " rows (" +
 		results.map(function(result) { return result.kind; }).join(" ") + "), " +
 		commandBarClosedCount + " closed tabs, in " + (Date.now() - startedAt) + " ms");
 	if (await commandBarAddFavicons(results) && message.seq === commandBarLatestSeq) {
-		sendToNativeHost({ action: "command_bar_results", seq: message.seq, results: results,
-			autocomplete: autocomplete, refresh: true });
+		sendToNativeHost(Object.assign({}, reply, { refresh: true }));
 	}
 };
 
@@ -670,11 +741,13 @@ var commandBarTrace = function(text) {
 var commandBarChoose = async function(message) {
 	var target = commandBarTarget;
 	commandBarTarget = null;
+	commandBarTip = null;
 	if (!target) {
 		return;
 	}
 	var text = (message.text || "").trim();
 	var item = message.item || (text ? commandBarDefaultRow(text) : null);
+	commandBarRetireUsedTip(item);
 	var newTab = target.mode === "new_tab";
 	try {
 		if (target.pick) {
@@ -944,6 +1017,7 @@ var commandBarSplitWithNew = async function(target, item) {
 
 var commandBarClosed = function() {
 	commandBarTarget = null;
+	commandBarTip = null;
 };
 
 commandBarLoadHistory();

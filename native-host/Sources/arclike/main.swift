@@ -1962,6 +1962,12 @@ func parseCommandBarItems(_ results: [[String: Any]]) -> [CommandBarItem] {
     return items
 }
 
+/// A one-line tip at the foot of an empty bar. Text between backticks is what to type.
+struct CommandBarTip {
+    let id: String
+    let text: String
+}
+
 enum CommandBarLayout {
     static let maxWidth: CGFloat = 720
     static let minWidth: CGFloat = 360
@@ -1970,10 +1976,17 @@ enum CommandBarLayout {
     static let rowSpacing: CGFloat = 2
     static let listPadding: CGFloat = 8
     static let cornerRadius: CGFloat = 16
+    static let tipHeight: CGFloat = 34
 
-    static func height(rows: Int) -> CGFloat {
-        guard rows > 0 else { return fieldHeight }
-        return fieldHeight + 1 + listPadding * 2 + CGFloat(rows) * rowHeight + CGFloat(rows - 1) * rowSpacing
+    static func height(rows: Int, tip: Bool = false) -> CGFloat {
+        var height = fieldHeight
+        if rows > 0 {
+            height += 1 + listPadding * 2 + CGFloat(rows) * rowHeight + CGFloat(rows - 1) * rowSpacing
+        }
+        if tip {
+            height += 1 + tipHeight
+        }
+        return height
     }
 }
 
@@ -1986,6 +1999,8 @@ final class CommandBarState: NSObject, ObservableObject, NSTextFieldDelegate, NS
     @Published var selectedIndex: Int?
     /// The text the rows were found for, whose words are shown in bold in the titles.
     @Published var itemsQuery = ""
+    /// Shown below the rows while nothing is typed. It is not a row, so the keys never select it.
+    @Published var tip: CommandBarTip?
 
     private(set) var isVisible = false
     /// What was typed. The field can show more: an inline completion after it, selected.
@@ -2026,6 +2041,7 @@ final class CommandBarState: NSObject, ObservableObject, NSTextFieldDelegate, NS
         completing = false
         items = []
         itemsQuery = ""
+        tip = nil
         selectedIndex = nil
         mouseLocationAtShow = NSEvent.mouseLocation
         isVisible = true
@@ -2054,7 +2070,7 @@ final class CommandBarState: NSObject, ObservableObject, NSTextFieldDelegate, NS
     }
 
     /// Rows for query `seq`. A `refresh` carries the same rows again with their favicons.
-    func receiveResults(seq: Int, items: [CommandBarItem], autocomplete: String, refresh: Bool) {
+    func receiveResults(seq: Int, items: [CommandBarItem], autocomplete: String, tip: CommandBarTip?, refresh: Bool) {
         guard isVisible, seq == querySeq else { return }
         if refresh {
             if items.count == self.items.count {
@@ -2063,6 +2079,7 @@ final class CommandBarState: NSObject, ObservableObject, NSTextFieldDelegate, NS
             return
         }
         self.items = items
+        self.tip = tip
         itemsQuery = typed
         selectedIndex = typed.trimmingCharacters(in: .whitespaces).isEmpty || items.isEmpty ? nil : 0
         if completing {
@@ -2097,6 +2114,14 @@ final class CommandBarState: NSObject, ObservableObject, NSTextFieldDelegate, NS
         // Hide first, so the browser window has the keyboard back before the tab opens.
         hidePanel()
         sendMessage(message)
+    }
+
+    /// Retire the tip on show. The bar stays open.
+    func dismissTip() {
+        guard isVisible, let tip = tip else { return }
+        self.tip = nil
+        resizePanel()
+        sendMessage(["action": "command_bar_dismiss_tip", "id": tip.id])
     }
 
     func hoverSelect(index: Int) {
@@ -2149,6 +2174,7 @@ final class CommandBarState: NSObject, ObservableObject, NSTextFieldDelegate, NS
         isVisible = false
         panel?.orderOut(nil)
         items = []
+        tip = nil
         selectedIndex = nil
     }
 
@@ -2156,7 +2182,7 @@ final class CommandBarState: NSObject, ObservableObject, NSTextFieldDelegate, NS
     private func resizePanel() {
         guard let panel = panel else { return }
         var frame = panel.frame
-        let height = CommandBarLayout.height(rows: items.count)
+        let height = CommandBarLayout.height(rows: items.count, tip: tip != nil)
         frame.origin.y = frame.maxY - height
         frame.size.height = height
         panel.setFrame(frame, display: true)
@@ -2300,6 +2326,49 @@ struct CommandBarRow: View {
     }
 }
 
+/// A tip's text, with what to type set apart in a monospaced font.
+func commandBarTipText(_ text: String) -> AttributedString {
+    var attributed = AttributedString()
+    for (index, part) in text.split(separator: "`", omittingEmptySubsequences: false).enumerated() {
+        if index % 2 == 1 {
+            var code = AttributedString("\u{2009}" + part + "\u{2009}")
+            code.font = .system(size: 12, design: .monospaced)
+            code.foregroundColor = .white.opacity(0.85)
+            code.backgroundColor = .white.opacity(0.1)
+            attributed += code
+        } else {
+            attributed += AttributedString(String(part))
+        }
+    }
+    return attributed
+}
+
+struct CommandBarTipView: View {
+    let tip: CommandBarTip
+    let onDismiss: () -> Void
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "lightbulb")
+                .font(.system(size: 12))
+            Text(commandBarTipText(tip.text))
+                .lineLimit(1)
+                .truncationMode(.tail)
+            Spacer(minLength: 8)
+            Image(systemName: "xmark")
+                .font(.system(size: 10, weight: .semibold))
+                .frame(width: 20, height: 20)
+                .contentShape(Rectangle())
+                .onTapGesture(perform: onDismiss)
+                .help("Don't show this tip again")
+        }
+        .font(.system(size: 12))
+        .foregroundColor(.white.opacity(0.5))
+        .padding(.horizontal, 20)
+        .frame(height: CommandBarLayout.tipHeight)
+    }
+}
+
 struct CommandBarView: View {
     @ObservedObject var state = CommandBarState.shared
     let field: NSTextField
@@ -2329,6 +2398,14 @@ struct CommandBarView: View {
                     }
                 }
                 .padding(CommandBarLayout.listPadding)
+            }
+
+            if let tip = state.tip {
+                Rectangle()
+                    .fill(Color.white.opacity(0.08))
+                    .frame(height: 1)
+                    .padding(.horizontal, 12)
+                CommandBarTipView(tip: tip) { state.dismissTip() }
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
@@ -2765,9 +2842,13 @@ func handleMessage(_ message: [String: Any]) {
             let items = parseCommandBarItems(results)
             let autocomplete = message["autocomplete"] as? String ?? ""
             let refresh = message["refresh"] as? Bool ?? false
+            var tip: CommandBarTip? = nil
+            if let dict = message["tip"] as? [String: Any], let id = dict["id"] as? String, let text = dict["text"] as? String {
+                tip = CommandBarTip(id: id, text: text)
+            }
             debugLog("Command bar results for query \(seq): \(items.count) rows\(refresh ? " (favicons)" : "")")
             DispatchQueue.main.async {
-                CommandBarState.shared.receiveResults(seq: seq, items: items, autocomplete: autocomplete, refresh: refresh)
+                CommandBarState.shared.receiveResults(seq: seq, items: items, autocomplete: autocomplete, tip: tip, refresh: refresh)
             }
         }
 

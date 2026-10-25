@@ -677,6 +677,8 @@ var connectNativeHost = function() {
 				commandBarChoose(message);
 			} else if (message.action === "command_bar_closed") {
 				commandBarClosed();
+			} else if (message.action === "command_bar_dismiss_tip") {
+				commandBarDismissTip(message.id);
 			} else if (message.action === "arc_data") {
 				arcDataReceived(message);
 			} else if (message.action === "error_no_accessibility") {

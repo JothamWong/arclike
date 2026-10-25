@@ -22,6 +22,7 @@ function load(opts = {}) {
   const record = (name, result) => async (...args) => { ran.push([name, ...args]); return result; };
   let state = { windows: opts.windows || [] };
   const session = {};            // what the worker saved to chrome.storage.session
+  const local = {};              // what the worker saved to chrome.storage.local
 
   const tabsById = () => {
     const m = new Map();
@@ -88,7 +89,8 @@ function load(opts = {}) {
     sessions: { restore: record('sessions.restore'), MAX_SESSION_RESULTS: 25,
       getRecentlyClosed: async () => opts.closed || [] },
     storage: {
-      local: { get: (k, cb) => cb && cb(opts.storage || {}), set: () => {} },
+      local: { get: (k, cb) => cb && cb(opts.storage || {}),
+        set: (items) => { Object.assign(local, JSON.parse(JSON.stringify(items))); } },
       // Every tab counts as visited this session unless a test says otherwise.
       session: {
         get: (k, cb) => cb && cb({ visitedTabs: opts.visited ||
@@ -122,7 +124,7 @@ function load(opts = {}) {
   vm.runInContext(fs.readFileSync(SRC, 'utf8'), ctx, { filename: 'mainsw.js' });
 
   const h = {
-    ctx, sandbox, chrome, sent, activated, windowsFocused, created, searched, ran, state, session,
+    ctx, sandbox, chrome, sent, activated, windowsFocused, created, searched, ran, state, session, local,
     // Values cross a realm boundary, so objects arrive with the VM's own prototypes. Copy
     // them into this realm before any deepStrictEqual comparison.
     g: (name) => {

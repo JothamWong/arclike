@@ -538,3 +538,76 @@ test('Site Settings opens the settings page of the tab\'s site', async () => {
   assert.deepStrictEqual(plain(h.created), [{ windowId: 1, openerTabId: 10,
     url: 'chrome://settings/content/siteDetails?site=https%3A%2F%2Fnews.ycombinator.com' }]);
 });
+
+test('an empty bar shows a tip below its rows, and the next bar the next tip', async () => {
+  const h = browser();
+  await h.call(`commandBarOpen("new_tab")`);
+  await query(h, '');
+  assert.deepStrictEqual(h.lastSent('command_bar_results').tip, { id: 'site-settings',
+    text: "Type `site sett` to open this site's permissions, like automatic picture-in-picture" });
+  await h.call(`commandBarClosed()`);
+  await h.call(`commandBarOpen("new_tab")`);
+  await query(h, '');
+  assert.strictEqual(h.lastSent('command_bar_results').tip.id, 'split-view');
+  assert.strictEqual(h.local.commandBarTips.next, 2, 'the place in the list is saved');
+});
+
+test('a tip shows only while nothing is typed', async () => {
+  const h = browser();
+  await h.call(`commandBarOpen("new_tab")`);
+  await query(h, 'net');
+  assert.strictEqual(h.lastSent('command_bar_results').tip, undefined);
+  await h.call(`commandBarOpen("current_tab")`);
+  await query(h, '');
+  assert.strictEqual(h.lastSent('command_bar_results').tip, undefined, 'Cmd+L holding an address has no tip');
+});
+
+test('a second choice, such as the tab to split with, has no tip', async () => {
+  const h = browser();
+  await h.call(`commandBarOpen("new_tab")`);
+  await h.call(`commandBarChoose({ item: { kind: "command", command: "split-view", pick: "split" }, text: "" })`);
+  await query(h, '');
+  assert.strictEqual(h.lastSent('command_bar_results').tip, undefined);
+});
+
+test('a dismissed tip is not shown again', async () => {
+  const h = browser();
+  await h.call(`commandBarOpen("new_tab")`);
+  await h.deliver({ action: 'command_bar_dismiss_tip', id: 'site-settings' });
+  await query(h, '');
+  assert.strictEqual(h.lastSent('command_bar_results').tip, undefined, 'the bar on screen loses its tip');
+  assert.deepStrictEqual(h.local.commandBarTips.retired, ['site-settings']);
+  for (let i = 0; i < 8; i++) {
+    await h.call(`commandBarOpen("new_tab")`);
+    assert.notStrictEqual(h.g('commandBarTip').id, 'site-settings');
+  }
+});
+
+test('using what a tip teaches retires it', async () => {
+  const h = browser({ closed: [{ lastModified: 1, tab: { sessionId: 's1', url: 'https://a.com/', title: 'A' } }] });
+  await h.call(`commandBarOpen("new_tab")`);
+  await h.call(`commandBarChoose({ item: { kind: "command", command: "site-settings" }, text: "" })`);
+  await h.call(`commandBarOpen("new_tab")`);
+  await h.call(`commandBarChoose({ item: { kind: "closed", sessionId: "s1" }, text: "" })`);
+  await h.call(`commandBarOpen("new_tab")`);
+  await h.call(`commandBarChoose({ item: { kind: "command", command: "mute-tab" }, text: "" })`);
+  assert.deepStrictEqual(h.local.commandBarTips.retired, ['site-settings', 'closed-tabs', 'tab-commands']);
+});
+
+test('tips saved earlier are read before the first bar, and none shows once all are retired', async () => {
+  const h = browser({ storage: { commandBarTips: { next: 0,
+    retired: ['site-settings', 'split-view', 'closed-tabs', 'tab-groups', 'tab-commands'] } } });
+  await h.call(`commandBarOpen("new_tab")`);
+  assert.strictEqual(h.g('commandBarTip').id, 'tab-switcher');
+  await h.call(`commandBarDismissTip("tab-switcher")`);
+  await h.call(`commandBarOpen("new_tab")`);
+  await query(h, '');
+  assert.strictEqual(h.lastSent('command_bar_results').tip, undefined);
+});
+
+test('the Split View tip is skipped where Chrome cannot split', async () => {
+  const h = browser({ storage: { commandBarTips: { next: 1, retired: [] } } });
+  h.chrome.tabs.createSplit = undefined;
+  await h.call(`commandBarOpen("new_tab")`);
+  assert.strictEqual(h.g('commandBarTip').id, 'closed-tabs');
+});
