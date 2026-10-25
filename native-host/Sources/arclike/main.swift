@@ -1926,6 +1926,11 @@ struct CommandBarItem: Identifiable {
     let title: String
     let detail: String
     let hint: String
+    /// SF Symbol drawn for a row without a favicon, such as a command.
+    let symbol: String
+    /// What the field shows while the row is selected with the arrow keys. Empty leaves the
+    /// field as typed.
+    let fill: String
     let favicon: NSImage?
     let payload: [String: Any]
 }
@@ -1940,12 +1945,16 @@ func parseCommandBarItems(_ results: [[String: Any]]) -> [CommandBarItem] {
            let data = Data(base64Encoded: String(dataUrl[dataUrl.index(after: comma)...])) {
             favicon = downsampleImage(data, maxPixelSize: 64)
         }
+        // Display-only fields stay out of the payload sent back when the row is chosen.
+        let fill = dict.removeValue(forKey: "fill") as? String ?? ""
         items.append(CommandBarItem(
             id: items.count,
             kind: kind,
             title: dict["title"] as? String ?? "",
             detail: dict["detail"] as? String ?? "",
             hint: dict["hint"] as? String ?? "",
+            symbol: dict["symbol"] as? String ?? "",
+            fill: fill,
             favicon: favicon,
             payload: dict
         ))
@@ -2103,13 +2112,21 @@ final class CommandBarState: NSObject, ObservableObject, NSTextFieldDelegate, NS
         editor.setSelectedRange(NSRange(location: start, length: (shown as NSString).length - start))
     }
 
+    /// Select the next or previous row, and show it in the field the way Arc and Zen do. Typing
+    /// after that edits what the field shows.
     private func move(_ delta: Int) {
         guard !items.isEmpty else { return }
+        let index: Int
         if let current = selectedIndex {
-            selectedIndex = (current + delta + items.count) % items.count
+            index = (current + delta + items.count) % items.count
         } else {
-            selectedIndex = delta > 0 ? 0 : items.count - 1
+            index = delta > 0 ? 0 : items.count - 1
         }
+        selectedIndex = index
+        let fill = items[index].fill
+        guard !fill.isEmpty, let field = panel?.field else { return }
+        field.stringValue = fill
+        field.currentEditor()?.selectedRange = NSRange(location: (fill as NSString).length, length: 0)
     }
 
     private func sendQuery() {
@@ -2260,7 +2277,7 @@ struct CommandBarRow: View {
                     .resizable()
                     .aspectRatio(contentMode: .fit)
             } else {
-                Image(systemName: item.kind == "search" ? "magnifyingglass" : "globe")
+                Image(systemName: !item.symbol.isEmpty ? item.symbol : item.kind == "search" ? "magnifyingglass" : "globe")
                     .resizable()
                     .aspectRatio(contentMode: .fit)
                     .foregroundColor(isSelected ? .black.opacity(0.7) : .white.opacity(0.75))

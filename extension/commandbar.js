@@ -101,16 +101,104 @@ var commandBarMatchScore = function(query, title, url) {
 	return score;
 };
 
-// Pages visited often, typed often or visited lately rank higher.
-var commandBarHistoryBonus = function(item) {
-	var bonus = Math.min(20, item.visitCount || 0) + Math.min(10, (item.typedCount || 0) * 2);
-	var age = Date.now() - (item.lastVisitTime || 0);
-	if (age < 24 * 60 * 60 * 1000) {
-		bonus += 8;
-	} else if (age < 7 * 24 * 60 * 60 * 1000) {
-		bonus += 4;
+// Damerau-Levenshtein distance between a and b, or max + 1 as soon as it must exceed max.
+var commandBarEditDistance = function(a, b, max) {
+	if (Math.abs(a.length - b.length) > max) {
+		return max + 1;
 	}
-	return bonus;
+	var before = null;
+	var previous = [];
+	for (var j = 0; j <= b.length; j++) {
+		previous[j] = j;
+	}
+	for (var i = 1; i <= a.length; i++) {
+		var current = [i];
+		var rowMin = i;
+		for (j = 1; j <= b.length; j++) {
+			var value = Math.min(previous[j] + 1, current[j - 1] + 1,
+				previous[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+			if (i > 1 && j > 1 && a[i - 1] === b[j - 2] && a[i - 2] === b[j - 1]) {
+				value = Math.min(value, before[j - 2] + 1);
+			}
+			current[j] = value;
+			rowMin = Math.min(rowMin, value);
+		}
+		if (rowMin > max) {
+			return max + 1;
+		}
+		before = previous;
+		previous = current;
+	}
+	return previous[b.length];
+};
+
+// The words of a page's title and URL, kept on the item so each is split once.
+var commandBarTokens = function(item, title, url) {
+	if (!item.commandBarTokens) {
+		item.commandBarTokens = ((title || "") + " " + url).toLowerCase().split(/[^a-z0-9]+/)
+			.filter(function(token) { return token.length >= 3; });
+	}
+	return item.commandBarTokens;
+};
+
+// Whether `word` is the start of one of `tokens` with a typo or two: one for a word of 4 to 7
+// letters, two from 8. A shorter word must match exactly.
+var commandBarFuzzyWord = function(word, tokens) {
+	var allowed = word.length >= 8 ? 2 : word.length >= 4 ? 1 : 0;
+	if (allowed === 0) {
+		return false;
+	}
+	for (var i = 0; i < tokens.length; i++) {
+		// A typo almost never changes the first letter, short of swapping the first two. Checking
+		// that first skips nearly every token, which keeps a pass over 10,000 pages fast.
+		var token = tokens[i];
+		if (token[0] !== word[0] && !(token[0] === word[1] && token[1] === word[0])) {
+			continue;
+		}
+		for (var length = word.length - allowed; length <= word.length + allowed; length++) {
+			if (length >= 3 && length <= tokens[i].length &&
+				commandBarEditDistance(word, tokens[i].slice(0, length), allowed) <= allowed) {
+				return true;
+			}
+		}
+	}
+	return false;
+};
+
+// The score of a page that matches the query only with typos, or -1. It ranks below every exact
+// match and never leads the list, so a misspelled search still searches.
+var COMMAND_BAR_FUZZY_SCORE = 5;
+var commandBarFuzzyScore = function(query, item, title, url) {
+	var words = query.trim().toLowerCase().split(/\s+/);
+	var lowerTitle = (title || "").toLowerCase();
+	var lowerUrl = url.toLowerCase();
+	var tokens = null;
+	for (var i = 0; i < words.length; i++) {
+		if (lowerTitle.indexOf(words[i]) !== -1 || lowerUrl.indexOf(words[i]) !== -1) {
+			continue;
+		}
+		tokens = tokens || commandBarTokens(item, title, url);
+		if (!commandBarFuzzyWord(words[i], tokens)) {
+			return -1;
+		}
+	}
+	return COMMAND_BAR_FUZZY_SCORE;
+};
+
+// Pages visited lately, often or by typing their address rank higher. Recency halves every
+// day. Frequency grows with the logarithm of the visit count and stops at 100 visits, so a page
+// opened thousands of times does not bury everything else. The most a page can get stays below
+// an open tab's bonus, so an open tab wins a tie.
+var COMMAND_BAR_TAB_BONUS = 45;
+var COMMAND_BAR_BOOKMARK_BONUS = 25;
+var COMMAND_BAR_RECENCY_HALF_LIFE_HOURS = 24;
+
+var commandBarHistoryBonus = function(item) {
+	var ageHours = Math.max(0, (Date.now() - (item.lastVisitTime || 0)) / (60 * 60 * 1000));
+	var recency = item.lastVisitTime ? Math.pow(0.5, ageHours / COMMAND_BAR_RECENCY_HALF_LIFE_HOURS) : 0;
+	var frequency = Math.min(1, Math.log1p(item.visitCount || 0) / Math.log1p(100));
+	var typed = Math.min(8, (item.typedCount || 0) * 2);
+	return 15 * recency + 20 * frequency + typed;
 };
 
 var commandBarSearchRow = function(text) {
@@ -151,6 +239,66 @@ var commandBarAutocomplete = function(query, lead) {
 	return text + site.slice(text.length);
 };
 
+// Commands the bar can run, like Chrome Palette's. Tab commands act on the tab the bar opened
+// over. Pages open like any other address. A command that closes several tabs at once is left
+// out on purpose: one stray Enter must not cost you your tabs.
+var COMMAND_BAR_COMMANDS = [
+	{ command: "close-tab", title: "Close Tab", hint: "⌘W", symbol: "xmark", tab: true },
+	{ command: "pin-tab", title: "Pin Tab", unTitle: "Unpin Tab", state: "pinned", symbol: "pin", tab: true },
+	{ command: "duplicate-tab", title: "Duplicate Tab", symbol: "plus.square.on.square", tab: true },
+	{ command: "mute-tab", title: "Mute Tab", unTitle: "Unmute Tab", state: "muted", symbol: "speaker.slash", tab: true },
+	{ command: "reload-tab", title: "Reload Tab", hint: "⌘R", symbol: "arrow.clockwise", tab: true },
+	{ command: "move-tab-to-new-window", title: "Move Tab to New Window", symbol: "macwindow.badge.plus", tab: true },
+	{ command: "copy-url", title: "Copy URL", hint: "⇧⌘C", symbol: "link", tab: true },
+	{ command: "reopen-closed-tab", title: "Reopen Closed Tab", hint: "⇧⌘T", symbol: "arrow.uturn.backward" },
+	{ command: "new-window", title: "New Window", hint: "⌘N", symbol: "macwindow" },
+	{ command: "new-incognito-window", title: "New Incognito Window", hint: "⇧⌘N", symbol: "eyeglasses" },
+	{ command: "full-screen", title: "Toggle Full Screen", hint: "⌃⌘F", symbol: "arrow.up.left.and.arrow.down.right" },
+	{ url: "chrome://settings/", title: "Settings", hint: "⌘,", symbol: "gearshape" },
+	{ url: "chrome://history/", title: "History", hint: "⌘Y", symbol: "clock" },
+	{ url: "chrome://downloads/", title: "Downloads", hint: "⇧⌘J", symbol: "arrow.down.circle" },
+	{ url: "chrome://extensions/", title: "Extensions", symbol: "puzzlepiece.extension" },
+	{ url: "chrome://bookmarks/", title: "Bookmarks", hint: "⌥⌘B", symbol: "book" },
+	{ url: "chrome://password-manager/", title: "Passwords", symbol: "key" },
+	{ url: "chrome://settings/clearBrowserData", title: "Clear Browsing Data", hint: "⇧⌘⌫", symbol: "trash" }
+];
+
+// The commands whose name has a word starting with each word of the query, best first. `target`
+// is the bar's target: without a tab, the tab commands are left out.
+var commandBarMatchingCommands = function(text, target) {
+	var words = text.toLowerCase().split(/\s+/).filter(Boolean);
+	if (!words.length) {
+		return [];
+	}
+	var hasTab = Boolean(target) && target.tabId !== null && target.tabId !== undefined;
+	var matches = [];
+	COMMAND_BAR_COMMANDS.forEach(function(definition) {
+		if (definition.tab && !hasTab) {
+			return;
+		}
+		var title = definition.state && target && target[definition.state] ? definition.unTitle : definition.title;
+		var lowerTitle = title.toLowerCase();
+		var allWords = words.every(function(word) { return commandBarWordStart(lowerTitle, word) !== -1; });
+		if (!allWords) {
+			return;
+		}
+		var match = commandBarWordStart(lowerTitle, text.toLowerCase()) === 0 ? 60 : 30;
+		var row = { kind: "command", title: title, detail: "", hint: definition.hint || "",
+			symbol: definition.symbol, match: match };
+		if (definition.url) {
+			row.url = definition.url;
+		} else {
+			row.command = definition.command;
+		}
+		matches.push(row);
+	});
+	matches.sort(function(a, b) { return b.match - a.match; });
+	return matches;
+};
+
+// When the exact pass finds fewer pages than this, a second pass allows typos.
+var COMMAND_BAR_FUZZY_BELOW = 3;
+
 // Rank open tabs, bookmarks and history for the query and put the typed text's own row (open
 // the URL, or search) among them. A page that is in several sources is listed once, as an open
 // tab first, then as a bookmark.
@@ -158,11 +306,12 @@ var commandBarRank = function(query, sources) {
 	var text = query.trim();
 	var candidates = [];
 	var byKey = new Map();
-	var add = function(kind, title, url, bonus, extra) {
+	var fuzzy = false;
+	var add = function(kind, item, title, url, bonus, extra) {
 		if (!url || /^javascript:/i.test(url)) {
 			return;
 		}
-		var match = commandBarMatchScore(text, title, url);
+		var match = fuzzy ? commandBarFuzzyScore(text, item, title, url) : commandBarMatchScore(text, title, url);
 		if (match < 0) {
 			return;
 		}
@@ -185,16 +334,24 @@ var commandBarRank = function(query, sources) {
 		byKey.set(key, candidate);
 		candidates.push(candidate);
 	};
-	(sources.tabs || []).forEach(function(tab) {
-		add("tab", tab.title, tab.url, 40, { tabId: tab.id });
-	});
-	(sources.bookmarks || []).forEach(function(bookmark) {
-		add("bookmark", bookmark.title, bookmark.url, 20);
-	});
-	(sources.history || []).forEach(function(item) {
-		add("history", item.title, item.url, commandBarHistoryBonus(item));
-	});
+	var addAll = function() {
+		(sources.tabs || []).forEach(function(tab) {
+			add("tab", tab, tab.title, tab.url, COMMAND_BAR_TAB_BONUS, { tabId: tab.id });
+		});
+		(sources.bookmarks || []).forEach(function(bookmark) {
+			add("bookmark", bookmark, bookmark.title, bookmark.url, COMMAND_BAR_BOOKMARK_BONUS);
+		});
+		(sources.history || []).forEach(function(item) {
+			add("history", item, item.title, item.url, commandBarHistoryBonus(item));
+		});
+	};
+	addAll();
+	if (candidates.length < COMMAND_BAR_FUZZY_BELOW && text.length >= 4) {
+		fuzzy = true;
+		addAll();
+	}
 	candidates.sort(function(a, b) { return b.score - a.score; });
+	var commands = commandBarMatchingCommands(text, sources.target);
 
 	var results = [];
 	var typedUrl = commandBarTypedUrl(text);
@@ -210,6 +367,10 @@ var commandBarRank = function(query, sources) {
 		var best = candidates[0];
 		var strong = best && text.length >= 2 && (best.match >= COMMAND_BAR_STRONG_HOST_MATCH ||
 			(best.kind === "tab" && best.match >= COMMAND_BAR_STRONG_TAB_MATCH));
+		// A command whose name starts with the query leads when no page does: "set" is Settings.
+		if (!strong && commands.length && commands[0].match >= COMMAND_BAR_STRONG_TAB_MATCH && text.length >= 3) {
+			results.push(commands.shift());
+		}
 		if (strong) {
 			// A site name leads with the site itself, unless a tab has a page of it open.
 			var site = best.kind !== "tab" && commandBarHost(best.url).indexOf(text.toLowerCase()) === 0 ?
@@ -220,6 +381,10 @@ var commandBarRank = function(query, sources) {
 		}
 		results.push(commandBarSearchRow(text));
 	}
+	// Other commands come right after the typed text's own rows, at most two of them.
+	commands.slice(0, 2).forEach(function(command) {
+		results.push(command);
+	});
 	for (var i = 0; i < candidates.length && results.length < COMMAND_BAR_MAX_RESULTS; i++) {
 		if (results.indexOf(candidates[i]) === -1) {
 			results.push(candidates[i]);
@@ -227,7 +392,7 @@ var commandBarRank = function(query, sources) {
 	}
 	return results.slice(0, COMMAND_BAR_MAX_RESULTS).map(function(result) {
 		var row = { kind: result.kind, title: result.title, detail: result.detail, hint: result.hint };
-		["url", "tabId", "text"].forEach(function(field) {
+		["url", "tabId", "text", "command", "symbol"].forEach(function(field) {
 			if (result[field] !== undefined) {
 				row[field] = result[field];
 			}
@@ -337,11 +502,13 @@ var commandBarSearch = async function(query) {
 		results = commandBarRank(query, {
 			tabs: found[0].filter(function(tab) { return tab.id !== hereTabId; }),
 			bookmarks: found[1].filter(function(bookmark) { return bookmark.url; }),
-			history: commandBarHistory ? Array.from(commandBarHistory.values()) : []
+			history: commandBarHistory ? Array.from(commandBarHistory.values()) : [],
+			target: commandBarTarget
 		});
 	}
 	results.forEach(function(result) {
-		var cached = result.url ? commandBarFavicons.get(commandBarFaviconKey(result.url)) : undefined;
+		result.fill = commandBarFill(result);
+		var cached = commandBarWantsFavicon(result) ? commandBarFavicons.get(commandBarFaviconKey(result.url)) : undefined;
 		if (cached !== undefined) {
 			result.favicon = cached;
 		}
@@ -349,11 +516,28 @@ var commandBarSearch = async function(query) {
 	return results;
 };
 
+// What the field shows while a row is selected with the arrow keys, as in Arc and Zen: the
+// row's address, or the query of a search. A command leaves the field as typed.
+var commandBarFill = function(result) {
+	if (result.kind === "search") {
+		return result.text;
+	}
+	if (result.kind === "command" || !result.url) {
+		return "";
+	}
+	return commandBarDisplayUrl(result.url);
+};
+
+// Commands draw their own symbol.
+var commandBarWantsFavicon = function(result) {
+	return Boolean(result.url) && result.kind !== "command";
+};
+
 // Fill in the favicons that were not cached. Returns whether any was added.
 var commandBarAddFavicons = async function(results) {
 	var added = false;
 	await Promise.all(results.map(async function(result) {
-		if (result.url && result.favicon === undefined) {
+		if (commandBarWantsFavicon(result) && result.favicon === undefined) {
 			result.favicon = await commandBarFavicon(result.url);
 			added = added || result.favicon !== "";
 		}
@@ -371,7 +555,8 @@ var commandBarOpen = async function(mode) {
 	}
 	var tabs = await chrome.tabs.query({ active: true, windowId: win.id });
 	var active = tabs[0];
-	commandBarTarget = { mode: mode, windowId: win.id, tabId: active ? active.id : null };
+	commandBarTarget = { mode: mode, windowId: win.id, tabId: active ? active.id : null,
+		pinned: Boolean(active && active.pinned), muted: Boolean(active && active.mutedInfo && active.mutedInfo.muted) };
 	var text = "";
 	if (mode === "current_tab" && active && !/^chrome:\/\/newtab\/?$/.test(active.url || "")) {
 		text = active.url || "";
@@ -428,6 +613,8 @@ var commandBarChoose = async function(message) {
 			if (newTab) {
 				await chrome.tabs.create({ windowId: target.windowId });
 			}
+		} else if (item.kind === "command" && item.command) {
+			await commandBarRunCommand(item.command, target);
 		} else if (item.kind === "tab") {
 			var tab = await chrome.tabs.get(item.tabId);
 			await chrome.windows.update(tab.windowId, { focused: true });
@@ -445,6 +632,50 @@ var commandBarChoose = async function(message) {
 		}
 	} catch (e) {
 		log("CommandBar::Could not open the choice: " + e.message);
+	}
+};
+
+var commandBarRunCommand = async function(command, target) {
+	var tabId = target.tabId;
+	switch (command) {
+	case "close-tab":
+		await chrome.tabs.remove(tabId);
+		break;
+	case "pin-tab":
+		await chrome.tabs.update(tabId, { pinned: !target.pinned });
+		break;
+	case "duplicate-tab":
+		await chrome.tabs.duplicate(tabId);
+		break;
+	case "mute-tab":
+		await chrome.tabs.update(tabId, { muted: !target.muted });
+		break;
+	case "reload-tab":
+		await chrome.tabs.reload(tabId);
+		break;
+	case "move-tab-to-new-window":
+		await chrome.windows.create({ tabId: tabId });
+		break;
+	case "copy-url":
+		// The app owns the clipboard and shows the same toast as Cmd+Shift+C.
+		var tab = await chrome.tabs.get(tabId);
+		sendToNativeHost({ action: "url_copied", url: tab.url, title: tab.title || "" });
+		break;
+	case "reopen-closed-tab":
+		await chrome.sessions.restore();
+		break;
+	case "new-window":
+		await chrome.windows.create({});
+		break;
+	case "new-incognito-window":
+		await chrome.windows.create({ incognito: true });
+		break;
+	case "full-screen":
+		var win = await chrome.windows.get(target.windowId);
+		await chrome.windows.update(target.windowId, { state: win.state === "fullscreen" ? "normal" : "fullscreen" });
+		break;
+	default:
+		log("CommandBar::Unknown command " + command);
 	}
 };
 

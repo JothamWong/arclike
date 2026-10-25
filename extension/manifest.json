@@ -14,7 +14,8 @@
     "bookmarks",
     "topSites",
     "search",
-    "favicon"
+    "favicon",
+    "sessions"
   ],
   "host_permissions": [
     "<all_urls>"

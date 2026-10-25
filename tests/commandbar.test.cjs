@@ -41,7 +41,7 @@ test('Cmd+T opens an empty bar over the focused window', async () => {
   const h = browser();
   await h.call(`commandBarOpen("new_tab")`);
   assert.deepStrictEqual(h.lastSent('show_command_bar'), { action: 'show_command_bar', mode: 'new_tab', text: '' });
-  assert.deepStrictEqual(h.g('commandBarTarget'), { mode: 'new_tab', windowId: 1, tabId: 10 });
+  assert.deepStrictEqual(h.g('commandBarTarget'), { mode: 'new_tab', windowId: 1, tabId: 10, pinned: false, muted: false });
 });
 
 test('Cmd+L opens the bar holding the current address', async () => {
@@ -193,6 +193,97 @@ test('rows are sent before their favicons, which follow', async () => {
   assert.strictEqual(replies[0].results[0].favicon, undefined);
   assert.strictEqual(replies[1].refresh, true);
   assert.strictEqual(replies[1].results[0].favicon, 'data:image/png;base64,AQID');
+});
+
+test('each row says what the field shows while it is selected', async () => {
+  const h = browser();
+  await h.call(`commandBarOpen("new_tab")`);
+  const results = await query(h, 'netf');
+  assert.deepStrictEqual(results.map(r => r.fill), ['netflix.com/browse', 'netf']);
+});
+
+test('a page visited an hour ago outranks one visited a week ago', () => {
+  const h = load();
+  const hour = h.call(`commandBarHistoryBonus({ visitCount: 5, lastVisitTime: Date.now() - 3600000 })`);
+  const week = h.call(`commandBarHistoryBonus({ visitCount: 5, lastVisitTime: Date.now() - 7 * 86400000 })`);
+  assert.ok(hour > week + 10, hour + ' vs ' + week);
+});
+
+test('a page visited thousands of times does not outrank an open tab', () => {
+  const h = load();
+  const most = h.call(`commandBarHistoryBonus({ visitCount: 100000, typedCount: 100, lastVisitTime: Date.now() })`);
+  assert.ok(most < h.g('COMMAND_BAR_TAB_BONUS'), String(most));
+});
+
+test('a typo still finds the page, below the search row', async () => {
+  const h = browser({ history: [{ url: 'https://www.youtube.com/', title: 'YouTube', visitCount: 30, lastVisitTime: Date.now() }] });
+  await h.call(`commandBarOpen("new_tab")`);
+  assert.deepStrictEqual(kinds(await query(h, 'youtbue')), ['search:youtbue', 'history:https://www.youtube.com/']);
+  assert.deepStrictEqual(kinds(await query(h, 'netlfix')).slice(0, 2), ['search:netlfix', 'tab:https://www.netflix.com/browse']);
+});
+
+test('short words and unrelated words do not match by typo', async () => {
+  const h = browser();
+  await h.call(`commandBarOpen("new_tab")`);
+  assert.deepStrictEqual(kinds(await query(h, 'nef')), ['search:nef']);
+  assert.deepStrictEqual(kinds(await query(h, 'zebra')), ['search:zebra']);
+});
+
+test('the start of a command name leads with the command', async () => {
+  const h = browser();
+  await h.call(`commandBarOpen("new_tab")`);
+  const results = await query(h, 'sett');
+  assert.deepStrictEqual(results[0], { kind: 'command', title: 'Settings', detail: '', hint: '⌘,',
+    url: 'chrome://settings/', symbol: 'gearshape', fill: '' });
+  assert.strictEqual(results[1].kind, 'search');
+});
+
+test('a command can follow the search row without leading', async () => {
+  const h = browser();
+  await h.call(`commandBarOpen("new_tab")`);
+  const results = await query(h, 'tab');
+  assert.strictEqual(results[0].kind, 'search');
+  assert.ok(results.slice(1, 3).every(r => r.kind === 'command'), JSON.stringify(results.slice(1, 3)));
+});
+
+test('the pin command says Unpin on a pinned tab', async () => {
+  const h = load({ windows: [win(1, [tab(10, { active: true, pinned: true })], true)] });
+  await h.call(`commandBarOpen("new_tab")`);
+  assert.strictEqual((await query(h, 'unpin'))[0].title, 'Unpin Tab');
+});
+
+test('tab commands run on the tab the bar opened over', async () => {
+  const h = browser();
+  for (const [command, expected] of [
+    ['close-tab', ['tabs.remove', 10]],
+    ['duplicate-tab', ['tabs.duplicate', 10]],
+    ['reload-tab', ['tabs.reload', 10]],
+    ['move-tab-to-new-window', ['windows.create', { tabId: 10 }]],
+    ['reopen-closed-tab', ['sessions.restore']],
+    ['new-incognito-window', ['windows.create', { incognito: true }]],
+  ]) {
+    h.ran.length = 0;
+    await h.call(`commandBarOpen("new_tab")`);
+    await h.call(`commandBarChoose({ item: { kind: "command", command: "${command}" }, text: "" })`);
+    assert.deepStrictEqual(plain(h.ran), [expected], command);
+  }
+  await h.call(`commandBarOpen("new_tab")`);
+  await h.call(`commandBarChoose({ item: { kind: "command", command: "pin-tab" }, text: "" })`);
+  assert.deepStrictEqual(plain(h.activated).pop(), { id: 10, props: { pinned: true } });
+});
+
+test('Copy URL hands the address to the app', async () => {
+  const h = browser();
+  await h.call(`commandBarOpen("new_tab")`);
+  await h.call(`commandBarChoose({ item: { kind: "command", command: "copy-url" }, text: "" })`);
+  assert.strictEqual(h.lastSent('url_copied').url, 'https://news.ycombinator.com/');
+});
+
+test('a Chrome page command opens like an address', async () => {
+  const h = browser();
+  await h.call(`commandBarOpen("new_tab")`);
+  await h.call(`commandBarChoose({ item: { kind: "command", url: "chrome://settings/" }, text: "set" })`);
+  assert.deepStrictEqual(plain(h.created), [{ windowId: 1, url: 'chrome://settings/' }]);
 });
 
 test('results are capped', async () => {

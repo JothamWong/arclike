@@ -18,6 +18,8 @@ function load(opts = {}) {
   const windowsFocused = [];
   const created = [];            // chrome.tabs.create calls
   const searched = [];           // chrome.search.query calls
+  const ran = [];                // other tab, window and session calls, as [name, ...args]
+  const record = (name, result) => async (...args) => { ran.push([name, ...args]); return result; };
   let state = { windows: opts.windows || [] };
   const session = {};            // what the worker saved to chrome.storage.session
 
@@ -54,6 +56,7 @@ function load(opts = {}) {
       },
       update: async (id, props) => { activated.push({ id, props }); return tabsById().get(id); },
       create: async (props) => { created.push(props); return Object.assign({ id: 999 }, props); },
+      remove: record('tabs.remove'), duplicate: record('tabs.duplicate'), reload: record('tabs.reload'),
       captureVisibleTab: async () => 'data:image/jpeg;base64,AAAA',
     },
     windows: {
@@ -69,11 +72,13 @@ function load(opts = {}) {
       getCurrent: async () => state.windows.find(w => w.focused) || state.windows[0],
       getLastFocused: async () => state.windows.find(w => w.focused) || state.windows[0],
       update: async (id, props) => { windowsFocused.push({ id, props }); return state.windows.find(w => w.id === id); },
+      create: record('windows.create', {}),
     },
     history: { search: async () => opts.history || [], onVisited: makeEvent(), onVisitRemoved: makeEvent() },
     bookmarks: { search: async () => opts.bookmarks || [] },
     topSites: { get: async () => opts.topSites || [] },
     search: { query: async (q) => { searched.push(q); } },
+    sessions: { restore: record('sessions.restore') },
     storage: {
       local: { get: (k, cb) => cb && cb(opts.storage || {}), set: () => {} },
       // Every tab counts as visited this session unless a test says otherwise.
@@ -109,7 +114,7 @@ function load(opts = {}) {
   vm.runInContext(fs.readFileSync(SRC, 'utf8'), ctx, { filename: 'mainsw.js' });
 
   const h = {
-    ctx, sandbox, chrome, sent, activated, windowsFocused, created, searched, state, session,
+    ctx, sandbox, chrome, sent, activated, windowsFocused, created, searched, ran, state, session,
     // Values cross a realm boundary, so objects arrive with the VM's own prototypes. Copy
     // them into this realm before any deepStrictEqual comparison.
     g: (name) => {
