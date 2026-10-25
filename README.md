@@ -27,6 +27,8 @@ Then:
 1. In `chrome://extensions`, turn on **Developer mode** and load the `extension` folder with **Load unpacked**.
 2. Open `/Applications/Arclike.app` once and allow Accessibility.
 
+Coming from Arc? Click the Arclike icon in Chrome and choose **Import from Arc**: favorites become pinned tabs, each space's pinned tabs become bookmarks, and its open tabs become a tab group.
+
 <details>
 <summary>After a change</summary>
 

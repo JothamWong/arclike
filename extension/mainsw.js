@@ -5,6 +5,7 @@
  */
 
 importScripts("commandbar.js");
+importScripts("arcimport.js");
 
 // Version checking
 var EXTENSION_VERSION = chrome.runtime.getManifest().version;
@@ -147,6 +148,11 @@ chrome.runtime.onMessage.addListener(function(request, sender, sendResponse) {
 		return true;
 	}
 	
+	if (request.action === "arc_import") {
+		handleArcImport(request).then(sendResponse);
+		return true;
+	}
+
 	if (request.action === "get_version_info") {
 		chrome.storage.local.get(["versionInfo"], function(result) {
 			sendResponse(result.versionInfo || null);
@@ -671,6 +677,8 @@ var connectNativeHost = function() {
 				commandBarChoose(message);
 			} else if (message.action === "command_bar_closed") {
 				commandBarClosed();
+			} else if (message.action === "arc_data") {
+				arcDataReceived(message);
 			} else if (message.action === "error_no_accessibility") {
 				log("Native host error: No accessibility permissions");
 				nativeHostConnected = false;

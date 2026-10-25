@@ -2818,6 +2818,12 @@ func handleMessage(_ message: [String: Any]) {
         debugLog("Received ping, sending pong")
         sendMessage(["action": "pong"])
 
+    case "read_arc":
+        let requestId = message["requestId"]
+        DispatchQueue.global(qos: .userInitiated).async {
+            sendMessage(arcImportResponse(requestId: requestId))
+        }
+
     case "url_copied":
         if let url = message["url"] as? String {
             debugLog("Received URL to copy: \(url)")
