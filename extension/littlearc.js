@@ -18,9 +18,18 @@ var littleArcChromeActive = true;
 var littleArcActivatedAt = 0;
 var littleArcCommandBarAt = 0;
 
-chrome.storage.local.get("littleArcForLinks", function(data) {
-	littleArcForLinks = Boolean(data && data.littleArcForLinks);
+var littleArcOptionLoaded = new Promise(function(resolve) {
+	chrome.storage.local.get("littleArcForLinks", function(data) {
+		littleArcForLinks = Boolean(data && data.littleArcForLinks);
+		resolve();
+	});
 });
+
+// Written to the app's log too, where the decisions on links are easier to read.
+var littleArcTrace = function(text) {
+	log("LittleArc::" + text);
+	sendToNativeHost({ action: "log", message: "LittleArc: " + text });
+};
 
 chrome.storage.onChanged.addListener(function(changes, area) {
 	if (area === "local" && changes.littleArcForLinks) {
@@ -29,6 +38,9 @@ chrome.storage.onChanged.addListener(function(changes, area) {
 });
 
 chrome.windows.onFocusChanged.addListener(function(windowId) {
+	if (littleArcForLinks) {
+		littleArcTrace("focus " + (windowId === chrome.windows.WINDOW_ID_NONE ? "left Chrome" : "on window " + windowId));
+	}
 	if (windowId === chrome.windows.WINDOW_ID_NONE) {
 		littleArcChromeActive = false;
 	} else {
@@ -58,7 +70,17 @@ var littleArcFromOtherApp = function(tab, now) {
 };
 
 chrome.tabs.onCreated.addListener(async function(tab) {
-	if (!littleArcForLinks || !littleArcFromOtherApp(tab, Date.now())) {
+	var now = Date.now();
+	await littleArcOptionLoaded;
+	if (!littleArcForLinks) {
+		return;
+	}
+	var fromOtherApp = littleArcFromOtherApp(tab, now);
+	littleArcTrace("tab " + tab.id + " created: opener " + tab.openerTabId + ", web page " +
+		/^https?:/i.test(tab.pendingUrl || tab.url || "") + ", Chrome in front " + littleArcChromeActive +
+		", " + (now - littleArcActivatedAt) + " ms since it came to the front, " +
+		(now - littleArcCommandBarAt) + " ms since the command bar -> " + (fromOtherApp ? "Little Arc" : "stays"));
+	if (!fromOtherApp) {
 		return;
 	}
 	try {
