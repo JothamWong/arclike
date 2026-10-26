@@ -2715,9 +2715,17 @@ extension AppDelegate {
 let DEBUG_LOGGING = true // Set to true for debugging
 let DEBUG_LOG_FILE = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/\(APP_NAME).log")
 
+// The log is moved aside to Arclike.old.log once it reaches this size, so it never holds more
+// than twice this on disk. The command bar logs every keystroke.
+let DEBUG_LOG_MAX_BYTES: UInt64 = 2 * 1024 * 1024
+let debugLogDateFormatter = ISO8601DateFormatter()
+let debugLogLock = NSLock()
+
 func debugLog(_ message: String) {
     if DEBUG_LOGGING {
-        let timestamp = ISO8601DateFormatter().string(from: Date())
+        debugLogLock.lock()
+        defer { debugLogLock.unlock() }
+        let timestamp = debugLogDateFormatter.string(from: Date())
         let logMessage = "[\(timestamp)] TabSwitch: \(message)\n"
         
         // Write to stderr
@@ -2725,6 +2733,12 @@ func debugLog(_ message: String) {
         
         // Also append to log file for debugging
         if let data = logMessage.data(using: .utf8) {
+            if let size = (try? FileManager.default.attributesOfItem(atPath: DEBUG_LOG_FILE.path))?[.size] as? UInt64,
+               size > DEBUG_LOG_MAX_BYTES {
+                let old = DEBUG_LOG_FILE.deletingPathExtension().appendingPathExtension("old.log")
+                try? FileManager.default.removeItem(at: old)
+                try? FileManager.default.moveItem(at: DEBUG_LOG_FILE, to: old)
+            }
             if FileManager.default.fileExists(atPath: DEBUG_LOG_FILE.path) {
                 if let handle = try? FileHandle(forWritingTo: DEBUG_LOG_FILE) {
                     handle.seekToEndOfFile()
@@ -3526,25 +3540,27 @@ func eventTapCallback(
     event: CGEvent,
     refcon: UnsafeMutableRawPointer?
 ) -> Unmanaged<CGEvent>? {
-    
+    // An event passed on is returned unretained: the tap does not own it, and retaining it
+    // leaked every key pressed anywhere on the Mac.
+
     // Handle tap disabled
     if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
         if let tap = keyboardEventTap {
             CGEvent.tapEnable(tap: tap, enable: true)
         }
-        return Unmanaged.passRetained(event)
+        return Unmanaged.passUnretained(event)
     }
     
     // Only process when a supported browser is active
     // Check against ALL known browsers (not just enabled ones) so it works before setup
     guard let frontApp = NSWorkspace.shared.frontmostApplication,
           let bundleId = frontApp.bundleIdentifier else {
-        return Unmanaged.passRetained(event)
+        return Unmanaged.passUnretained(event)
     }
     
     let allKnownBrowserIds = Set(knownBrowsers.map { $0.id })
     guard allKnownBrowserIds.contains(bundleId) else {
-        return Unmanaged.passRetained(event)
+        return Unmanaged.passUnretained(event)
     }
     
     let flags = event.flags
@@ -3570,7 +3586,7 @@ func eventTapCallback(
         }
 
         switchModifierIsPressed = modifierNowPressed
-        return Unmanaged.passRetained(event)
+        return Unmanaged.passUnretained(event)
     }
 
     // Handle key down events
@@ -3628,7 +3644,7 @@ func eventTapCallback(
         }
     }
 
-    return Unmanaged.passRetained(event)
+    return Unmanaged.passUnretained(event)
 }
 
 // MARK: - Setup Event Tap
