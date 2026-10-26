@@ -248,8 +248,8 @@ let knownBrowsers: [BrowserInfo] = [
                 nativeMessagingPath: "Google/Chrome Canary/NativeMessagingHosts",
                 extensionId: nil, isEnabled: false, appName: "Google Chrome Canary"),
     BrowserInfo(id: "org.chromium.Chromium", name: "Chromium",
-            nativeMessagingPath: "Chromium/NativeMessagingHosts",
-            extensionId: nil, isEnabled: false, appName: "Chromium"),
+                nativeMessagingPath: "Chromium/NativeMessagingHosts",
+                extensionId: nil, isEnabled: false, appName: "Chromium"),
 ]
 
 // MARK: - Browser Configuration Manager
