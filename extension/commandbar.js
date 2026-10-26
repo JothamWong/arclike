@@ -260,7 +260,7 @@ var COMMAND_BAR_COMMANDS = [
 	{ command: "reload-tab", title: "Reload Tab", hint: "⌘R", symbol: "arrow.clockwise", tab: true },
 	{ command: "move-tab-to-new-window", title: "Move Tab to New Window", symbol: "macwindow.badge.plus", tab: true },
 	{ command: "open-in-little-arc", title: "Open in Little Arc", symbol: "macwindow.on.rectangle", tab: true, when: "mainWindow" },
-	{ command: "move-to-main-window", title: "Move to Main Window", symbol: "macwindow", tab: true, when: "littleArc" },
+	{ command: "move-to-main-window", title: "Move to Main Window", hint: "⌘O", symbol: "macwindow", tab: true, when: "littleArc" },
 	{ command: "new-little-arc", title: "New Little Arc", symbol: "plus.rectangle.on.rectangle" },
 	{ command: "copy-url", title: "Copy URL", hint: "⇧⌘C", symbol: "link", tab: true },
 	{ command: "site-settings", title: "Site Settings", symbol: "slider.horizontal.3", tab: true },
@@ -287,11 +287,12 @@ var COMMAND_BAR_COMMANDS = [
 
 // Chrome's own shortcuts for the same commands on Windows, where the macOS hints above would
 // be wrong. Copy URL is the Windows app's Alt+Shift+C, since Ctrl+Shift+C opens DevTools there.
-// Settings has no shortcut on Windows.
+// Settings has no shortcut on Windows, and the Windows app does not take Ctrl+O for Move to Main
+// Window.
 var COMMAND_BAR_WINDOWS_HINTS = {
 	"⌘W": "Ctrl+W", "⌘R": "Ctrl+R", "⇧⌘C": "Alt+Shift+C", "⇧⌘T": "Ctrl+Shift+T", "⌘N": "Ctrl+N",
 	"⇧⌘N": "Ctrl+Shift+N", "⌃⌘F": "F11", "⌘,": "", "⌘Y": "Ctrl+H", "⇧⌘J": "Ctrl+J", "⌥⌘B": "Ctrl+Shift+O",
-	"⇧⌘⌫": "Ctrl+Shift+Del"
+	"⇧⌘⌫": "Ctrl+Shift+Del", "⌘O": ""
 };
 
 var commandBarOnWindows = /Windows/.test(navigator.userAgent);

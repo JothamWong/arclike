@@ -2836,6 +2836,19 @@ func handleMessage(_ message: [String: Any]) {
             }
         }
 
+    case "little_arc_focus":
+        let focused = message["focused"] as? Bool ?? false
+        DispatchQueue.main.async {
+            littleArcFocusedHere = focused
+            guard let browser = ownerBrowserBundleId else { return }
+            DistributedNotificationCenter.default().postNotificationName(
+                NSNotification.Name(littleArcFocusNotificationName),
+                object: nil,
+                userInfo: ["browser": browser, "pid": Int(myProcessId), "focused": focused],
+                deliverImmediately: true
+            )
+        }
+
     case "log":
         if let text = message["message"] as? String {
             debugLog("Extension: \(text)")
@@ -3027,6 +3040,10 @@ var extensionSupportsCommandBar = false  // Our extension can answer the command
 /// Native hosts whose extension answers the command bar, by browser. Every instance keeps this,
 /// since any of them may become the event tap leader. Only touched on the main thread.
 var commandBarHosts: [String: Set<pid_t>] = [:]
+// Native hosts whose browser profile has a Little Arc in front, by browser. The event tap
+// leader takes Cmd+O only then, so Chrome keeps it for Open File everywhere else.
+var littleArcFocusedHosts: [String: Set<pid_t>] = [:]
+var littleArcFocusedHere = false  // This host's own profile has a Little Arc in front
 
 // Detect which browser launched this native host by checking parent process
 // Returns (bundleId, processId) tuple
@@ -3182,6 +3199,8 @@ let shortcutsChangedNotificationName = APP_ID + ".shortcutsChanged"
 let commandBarNotificationName = APP_ID + ".commandBar"
 let commandBarReadyNotificationName = APP_ID + ".commandBarReady"
 let commandBarRollCallNotificationName = APP_ID + ".commandBarRollCall"
+let littleArcFocusNotificationName = APP_ID + ".littleArcFocus"
+let littleArcToMainNotificationName = APP_ID + ".littleArcToMain"
 
 // Setup listener for distributed notifications (for non-leader hosts)
 func setupNotificationListener() {
@@ -3300,6 +3319,25 @@ func setupNotificationListener() {
               let browser = userInfo["browser"] as? String,
               let pid = userInfo["pid"] as? Int else { return }
         commandBarHosts[browser, default: []].insert(pid_t(pid))
+    }
+
+    center.addObserver(forName: NSNotification.Name(littleArcFocusNotificationName), object: nil, queue: .main) { notification in
+        guard let userInfo = notification.userInfo,
+              let browser = userInfo["browser"] as? String,
+              let pid = userInfo["pid"] as? Int else { return }
+        if userInfo["focused"] as? Bool == true {
+            littleArcFocusedHosts[browser, default: []].insert(pid_t(pid))
+        } else {
+            littleArcFocusedHosts[browser]?.remove(pid_t(pid))
+        }
+    }
+
+    // Cmd+O in a Little Arc: the host whose profile has it in front moves its tab to the main window.
+    center.addObserver(forName: NSNotification.Name(littleArcToMainNotificationName), object: nil, queue: .main) { notification in
+        guard let targetBrowser = notification.userInfo?["targetBrowser"] as? String,
+              ownerBrowserBundleId == targetBrowser,
+              littleArcFocusedHere else { return }
+        sendMessage(["action": "little_arc_to_main"])
     }
 
     center.addObserver(forName: NSNotification.Name(commandBarRollCallNotificationName), object: nil, queue: .main) { _ in
@@ -3492,6 +3530,13 @@ func commandBarAvailable(for browser: String) -> Bool {
     return !alive.isEmpty
 }
 
+func littleArcFocused(for browser: String) -> Bool {
+    guard let pids = littleArcFocusedHosts[browser] else { return false }
+    let alive = pids.filter { kill($0, 0) == 0 }
+    littleArcFocusedHosts[browser] = alive
+    return !alive.isEmpty
+}
+
 func postCommandBarNotification(mode: String, browser: String) {
     DistributedNotificationCenter.default().postNotificationName(
         NSNotification.Name(commandBarNotificationName),
@@ -3577,6 +3622,19 @@ func eventTapCallback(
         if isCommandBarKey && currentMods == CGEventFlags.maskCommand.rawValue && commandBarAvailable(for: bundleId) {
             if event.getIntegerValueField(.keyboardEventAutorepeat) == 0 {
                 postCommandBarNotification(mode: keyCode == Int64(kVK_ANSI_T) ? "new_tab" : "current_tab", browser: bundleId)
+            }
+            return nil
+        }
+
+        // Cmd+O in a Little Arc moves its tab to the main window, as in Arc.
+        if keyCode == Int64(kVK_ANSI_O) && currentMods == CGEventFlags.maskCommand.rawValue && littleArcFocused(for: bundleId) {
+            if event.getIntegerValueField(.keyboardEventAutorepeat) == 0 {
+                DistributedNotificationCenter.default().postNotificationName(
+                    NSNotification.Name(littleArcToMainNotificationName),
+                    object: nil,
+                    userInfo: ["targetBrowser": bundleId],
+                    deliverImmediately: true
+                )
             }
             return nil
         }

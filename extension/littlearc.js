@@ -17,6 +17,7 @@ var littleArcForLinks = false;
 var littleArcChromeActive = true;
 var littleArcActivatedAt = 0;
 var littleArcCommandBarAt = 0;
+var littleArcInFront = false;   // a Little Arc of this profile has focus, as last told to the app
 
 var littleArcOptionLoaded = new Promise(function(resolve) {
 	chrome.storage.local.get("littleArcForLinks", function(data) {
@@ -41,6 +42,7 @@ chrome.windows.onFocusChanged.addListener(function(windowId) {
 	if (littleArcForLinks) {
 		littleArcTrace("focus " + (windowId === chrome.windows.WINDOW_ID_NONE ? "left Chrome" : "on window " + windowId));
 	}
+	littleArcTellFocus(windowId);
 	if (windowId === chrome.windows.WINDOW_ID_NONE) {
 		littleArcChromeActive = false;
 	} else {
@@ -50,6 +52,33 @@ chrome.windows.onFocusChanged.addListener(function(windowId) {
 		littleArcChromeActive = true;
 	}
 });
+
+// Tell the app whether a Little Arc is in front, so it takes Cmd+O only then. Chrome keeps Cmd+O
+// for Open File everywhere else.
+var littleArcTellFocus = async function(windowId) {
+	var inFront = false;
+	if (windowId !== chrome.windows.WINDOW_ID_NONE) {
+		var win = await chrome.windows.get(windowId).catch(function() { return null; });
+		inFront = Boolean(win && win.type === "popup");
+	}
+	if (inFront !== littleArcInFront) {
+		littleArcInFront = inFront;
+		sendToNativeHost({ action: "little_arc_focus", focused: inFront });
+	}
+};
+
+// Cmd+O, sent by the app while a Little Arc is in front: move its tab to the main window.
+var littleArcToMainFromKey = async function() {
+	try {
+		var win = await chrome.windows.getLastFocused({ windowTypes: ["popup"], populate: true });
+		var tab = win && win.focused && win.type === "popup" && win.tabs.find(function(t) { return t.active; });
+		if (tab) {
+			await littleArcMoveToMain(tab.id);
+		}
+	} catch (e) {
+		log("LittleArc::Could not move to the main window: " + e.message);
+	}
+};
 
 // Called by the command bar just before it opens a choice.
 var littleArcCommandBarOpening = function() {

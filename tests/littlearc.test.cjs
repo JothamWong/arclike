@@ -124,3 +124,24 @@ test('turning the option on in the popup takes effect at once', async () => {
   await settle();
   assert.strictEqual(plain(h.ran).length, 1);
 });
+
+test('the app is told when a Little Arc comes to the front and when it leaves', async () => {
+  const h = inLittleArc();
+  h.chrome.windows.onFocusChanged.emit(2);
+  await settle();
+  h.chrome.windows.onFocusChanged.emit(2);
+  await settle();
+  h.chrome.windows.onFocusChanged.emit(1);
+  await settle();
+  h.chrome.windows.onFocusChanged.emit(-1);
+  await settle();
+  assert.deepStrictEqual(h.sent.filter(m => m.action === 'little_arc_focus').map(m => m.focused), [true, false]);
+});
+
+test('Cmd+O in a Little Arc moves its tab to the main window', async () => {
+  const h = inLittleArc();
+  await h.deliver({ action: 'ready' });
+  await h.deliver({ action: 'little_arc_to_main' });
+  await settle();
+  assert.deepStrictEqual(plain(h.ran), [['tabs.move', 20, { windowId: 1, index: -1 }]]);
+});
