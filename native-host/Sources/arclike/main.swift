@@ -7,7 +7,7 @@ import Sparkle
 import UserNotifications
 import ImageIO
 
-let APP_VERSION = "0.1.0"
+let APP_VERSION = "0.2.1"
 
 // MARK: - Branding
 
@@ -2883,6 +2883,10 @@ func handleMessage(_ message: [String: Any]) {
                 "copyUrl": BrowserConfigManager.shared.shortcuts.copyUrl.displayString
             ]
             sendMessage(["action": "registered", "bundleId": ownerBrowserBundleId ?? bundleId, "shortcuts": shortcuts])
+            DispatchQueue.main.async {
+                extensionRegistered = true
+                announceHost()
+            }
             if let features = message["features"] as? [String], features.contains("command_bar") {
                 DispatchQueue.main.async {
                     extensionSupportsCommandBar = true
@@ -3037,6 +3041,11 @@ var myProcessId: pid_t = getpid()  // This native host's PID for identification
 var isEventTapLeader = false  // Whether this instance owns the event tap
 var allowConfigUI = false  // Allow showing config UI even if not direct launch
 var extensionSupportsCommandBar = false  // Our extension can answer the command bar
+var extensionRegistered = false  // Our extension has connected and registered
+/// Native hosts whose extension has registered, by browser. The event tap leader acts only in a
+/// browser listed here, so a browser without Arclike keeps every key, Ctrl+Tab included. Every
+/// instance keeps this, since any of them may become the leader. Only touched on the main thread.
+var connectedHosts: [String: Set<pid_t>] = [:]
 /// Native hosts whose extension answers the command bar, by browser. Every instance keeps this,
 /// since any of them may become the event tap leader. Only touched on the main thread.
 var commandBarHosts: [String: Set<pid_t>] = [:]
@@ -3198,6 +3207,7 @@ let copyUrlNotificationName = APP_ID + ".copyUrl"
 let shortcutsChangedNotificationName = APP_ID + ".shortcutsChanged"
 let commandBarNotificationName = APP_ID + ".commandBar"
 let commandBarReadyNotificationName = APP_ID + ".commandBarReady"
+let hostReadyNotificationName = APP_ID + ".hostReady"
 let commandBarRollCallNotificationName = APP_ID + ".commandBarRollCall"
 let littleArcFocusNotificationName = APP_ID + ".littleArcFocus"
 let littleArcToMainNotificationName = APP_ID + ".littleArcToMain"
@@ -3314,6 +3324,13 @@ func setupNotificationListener() {
         sendMessage(["action": "command_bar_open", "mode": mode])
     }
 
+    center.addObserver(forName: NSNotification.Name(hostReadyNotificationName), object: nil, queue: .main) { notification in
+        guard let userInfo = notification.userInfo,
+              let browser = userInfo["browser"] as? String,
+              let pid = userInfo["pid"] as? Int else { return }
+        connectedHosts[browser, default: []].insert(pid_t(pid))
+    }
+
     center.addObserver(forName: NSNotification.Name(commandBarReadyNotificationName), object: nil, queue: .main) { notification in
         guard let userInfo = notification.userInfo,
               let browser = userInfo["browser"] as? String,
@@ -3341,6 +3358,9 @@ func setupNotificationListener() {
     }
 
     center.addObserver(forName: NSNotification.Name(commandBarRollCallNotificationName), object: nil, queue: .main) { _ in
+        if extensionRegistered {
+            announceHost()
+        }
         if extensionSupportsCommandBar {
             announceCommandBar()
         }
@@ -3509,6 +3529,26 @@ func postCopyUrlNotification() {
     debugLog("Posted copy-url notification for browser: \(frontmostBrowser)")
 }
 
+/// Tell every instance that our browser's extension is connected, so the leader starts taking
+/// Arclike's shortcuts in that browser.
+func announceHost() {
+    guard let browser = ownerBrowserBundleId else { return }
+    DistributedNotificationCenter.default().postNotificationName(
+        NSNotification.Name(hostReadyNotificationName),
+        object: nil,
+        userInfo: ["browser": browser, "pid": Int(myProcessId)],
+        deliverImmediately: true
+    )
+}
+
+/// Whether a running native host has a connected extension in `browser`.
+func hostAvailable(for browser: String) -> Bool {
+    guard let pids = connectedHosts[browser] else { return false }
+    let alive = pids.filter { kill($0, 0) == 0 }
+    connectedHosts[browser] = alive
+    return !alive.isEmpty
+}
+
 /// Tell every instance that our browser's extension answers the command bar, so the leader
 /// starts taking Cmd+T and Cmd+L from that browser.
 func announceCommandBar() {
@@ -3566,15 +3606,15 @@ func eventTapCallback(
         return Unmanaged.passUnretained(event)
     }
     
-    // Only process when a supported browser is active
-    // Check against ALL known browsers (not just enabled ones) so it works before setup
+    // Only process when the frontmost app is a browser with Arclike connected. A known browser
+    // without the extension (Arc next to Chrome, say) must keep Ctrl+Tab and every other key.
     guard let frontApp = NSWorkspace.shared.frontmostApplication,
           let bundleId = frontApp.bundleIdentifier else {
         return Unmanaged.passUnretained(event)
     }
     
     let allKnownBrowserIds = Set(knownBrowsers.map { $0.id })
-    guard allKnownBrowserIds.contains(bundleId) else {
+    guard allKnownBrowserIds.contains(bundleId), hostAvailable(for: bundleId) else {
         return Unmanaged.passUnretained(event)
     }
     
